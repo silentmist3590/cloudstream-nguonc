@@ -60,6 +60,8 @@ subprojects {
         val implementation by configurations
         cloudstream("com.lagradost:cloudstream3:pre-release")
         implementation(kotlin("stdlib"))
+        implementation("com.github.Blatzar:NiceHttp:0.4.11") // thư viện HTTP, chứa lớp Requests
+        implementation("org.jsoup:jsoup:1.17.2")              // parse HTML (nếu code có dùng)
         implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
     }
 }
