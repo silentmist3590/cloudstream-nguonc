@@ -40,7 +40,7 @@ jobs:
 
       - name: Build Plugins (.cs3)
         run: |
-          gradle make makePluginsJson || true
+          gradle :PhimNguonC:make makePluginsJson || gradle make makePluginsJson || true
 
       - name: Deploy to builds branch
         run: |
@@ -51,13 +51,47 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b builds
 
-          # Copy files
+          # 1. Tự động tạo repo.json chuẩn
+          cat << 'EOF' > repo.json
+          {
+            "name": "Phim NguonC",
+            "description": "Kho phim NguonC cho CloudStream 3 - Hỗ trợ Phim Mới, Hành Động, Hài, Chiến Tranh, Lịch Sử, Phim 18+",
+            "manifestVersion": 1,
+            "pluginLists": [
+              "https://raw.githubusercontent.com/silentmist3590/cloudstream-nguonc/builds/plugins.json"
+            ]
+          }
+          EOF
+
+          # 2. Tự động tạo plugins.json chuẩn
+          cat << 'EOF' > plugins.json
+          [
+            {
+              "name": "Phim NguonC",
+              "internalName": "PhimNguonCProvider",
+              "version": 1,
+              "description": "Xem phim từ nguồn phim.nguonc.com trên CloudStream: Hành động, Hài, Chiến tranh, Lịch sử, Phim 18+, Phim bộ, Phim lẻ với máy chủ Vietsub và Thuyết minh tốc độ cao.",
+              "authors": [
+                "silentmist3590"
+              ],
+              "tvTypes": [
+                "Movie",
+                "TvSeries",
+                "AsianDrama",
+                "NSFW"
+              ],
+              "iconUrl": "https://phim.nguonc.com/favicon.ico",
+              "repositoryUrl": "https://phim.nguonc.com",
+              "url": "https://raw.githubusercontent.com/silentmist3590/cloudstream-nguonc/builds/PhimNguonC.cs3",
+              "status": 1,
+              "apiVersion": 1
+            }
+          ]
+          EOF
+
+          # 3. Sao chép plugin .cs3 đã build
           find .. -name "*.cs3" -exec cp {} ./ \; 2>/dev/null || true
-          find .. -name "plugins.json" -exec cp {} ./ \; 2>/dev/null || true
-          if [ -f "../repo.json" ]; then
-            cp ../repo.json ./
-          fi
 
           git add -A
-          git commit -m "Auto Build CloudStream Plugins [skip ci]" || exit 0
+          git commit -m "Auto Update CloudStream Repo and Plugins [skip ci]" || exit 0
           git push -f https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git builds
