@@ -36,11 +36,12 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
-          gradle-version: 8.5
+          gradle-version: 8.12
 
       - name: Build Plugins (.cs3)
         run: |
-          gradle :PhimNguonC:make makePluginsJson || gradle make makePluginsJson || true
+          gradle make makePluginsJson --stacktrace > build.log 2>&1 || true
+          cat build.log
 
       - name: Deploy to builds branch
         run: |
@@ -89,8 +90,9 @@ jobs:
           ]
           EOF
 
-          # 3. Sao chép plugin .cs3 đã build
+          # 3. Sao chép plugin .cs3 và log
           find .. -name "*.cs3" -exec cp {} ./ \; 2>/dev/null || true
+          cp ../build.log ./ 2>/dev/null || true
 
           git add -A
           git commit -m "Auto Update CloudStream Repo and Plugins [skip ci]" || exit 0
