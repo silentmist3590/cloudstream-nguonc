@@ -8,9 +8,8 @@ import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
 
 @CloudstreamPlugin
-class PhimNguonCPlugin: Plugin() {
+class PhimNguonCPlugin : Plugin() {
     override fun load(context: Context) {
-        // Đăng ký provider Phim NguonC vào CloudStream
         registerMainAPI(PhimNguonCProvider())
     }
 }
@@ -45,14 +44,7 @@ class PhimNguonCProvider : MainAPI() {
     ): HomePageResponse {
         val url = "$mainUrl/api/films/${request.data}?page=$page"
         val res = app.get(url).parsedSafe<NguonCListResponse>()
-        val homeItems = res?.items?.mapNotNull { item ->
-            val title = item.name ?: return@mapNotNull null
-            val poster = item.posterUrl ?: item.thumbUrl
-            newMovieSearchResponse(title, "$mainUrl/api/film/${item.slug}", TvType.Movie) {
-                this.posterUrl = poster
-                this.year = item.year?.toIntOrNull()
-            }
-        } ?: emptyList()
+        val homeItems = res?.items?.mapNotNull { it.toSearchResponse() } ?: emptyList()
 
         val hasNext = (res?.paginate?.currentPage ?: 0) < (res?.paginate?.totalPage ?: 0)
         return newHomePageResponse(request.name, homeItems, hasNext = hasNext)
@@ -61,14 +53,17 @@ class PhimNguonCProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val url = "$mainUrl/api/films/search?keyword=$query"
         val res = app.get(url).parsedSafe<NguonCListResponse>()
-        return res?.items?.mapNotNull { item ->
-            val title = item.name ?: return@mapNotNull null
-            val poster = item.posterUrl ?: item.thumbUrl
-            newMovieSearchResponse(title, "$mainUrl/api/film/${item.slug}", TvType.Movie) {
-                this.posterUrl = poster
-                this.year = item.year?.toIntOrNull()
-            }
-        } ?: emptyList()
+        return res?.items?.mapNotNull { it.toSearchResponse() } ?: emptyList()
+    }
+
+    private fun NguonCItem.toSearchResponse(): SearchResponse? {
+        val title = name ?: return null
+        val poster = posterUrl ?: thumbUrl
+        val yearInt = year?.toIntOrNull()
+        return newMovieSearchResponse(title, "$mainUrl/api/film/$slug", TvType.Movie) {
+            this.posterUrl = poster
+            this.year = yearInt
+        }
     }
 
     override suspend fun load(url: String): LoadResponse? {
@@ -82,19 +77,21 @@ class PhimNguonCProvider : MainAPI() {
         movie.episodes?.forEach { server ->
             val serverName = server.serverName ?: "NguonC"
             server.items?.forEach { ep ->
-                val epName = ep.name ?: "Tập 1"
+                val epName = ep.name ?: "1"
                 val epNum = epName.toIntOrNull()
-                episodes.add(
-                    Episode(
-                        data = ep.embed ?: "",
-                        name = "$serverName - Tập $epName",
-                        episode = epNum
+                val embed = ep.embed
+                if (!embed.isNullOrBlank()) {
+                    episodes.add(
+                        newEpisode(embed) {
+                            this.name = "$serverName - Tập $epName"
+                            this.episode = epNum
+                        }
                     )
-                )
+                }
             }
         }
 
-        return newMovieLoadResponse(title, url, TvType.Movie, episodes) {
+        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
             this.posterUrl = poster
             this.plot = desc
             this.year = movie.year
