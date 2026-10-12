@@ -1,3 +1,8 @@
+import com.android.build.gradle.BaseExtension
+import com.lagradost.cloudstream3.gradle.CloudstreamExtension
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
+
 buildscript {
     repositories {
         google()
@@ -16,5 +21,43 @@ allprojects {
         google()
         mavenCentral()
         maven("https://jitpack.io")
+    }
+}
+
+fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) = extensions.getByName<CloudstreamExtension>("cloudstream").configuration()
+fun Project.android(configuration: BaseExtension.() -> Unit) = extensions.getByName<BaseExtension>("android").configuration()
+
+subprojects {
+    apply(plugin = "com.android.library")
+    apply(plugin = "kotlin-android")
+    apply(plugin = "com.lagradost.cloudstream3.gradle")
+
+    cloudstream {
+        setRepo(System.getenv("GITHUB_REPOSITORY") ?: "silentmist3590/cloudstream-nguonc")
+    }
+
+    android {
+        namespace = "com.lagradost.nguonc"
+        defaultConfig {
+            minSdk = 21
+            compileSdkVersion(34)
+            targetSdk = 34
+        }
+        compileOptions {
+            sourceCompatibility = JavaVersion.VERSION_1_8
+            targetCompatibility = JavaVersion.VERSION_1_8
+        }
+        tasks.withType<KotlinJvmCompile> {
+            compilerOptions {
+                jvmTarget.set(JvmTarget.JVM_1_8)
+            }
+        }
+    }
+
+    dependencies {
+        val cloudstream by configurations
+        cloudstream("com.lagradost:cloudstream3:pre-release")
+        implementation(kotlin("stdlib"))
+        implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
     }
 }
