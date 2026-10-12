@@ -1,0 +1,8 @@
+{
+  "name": "NguonC CloudStream Repository",
+  "description": "Kho phim NguonC cho CloudStream 3 - Hỗ trợ Phim Mới, Hành Động, Hài, Chiến Tranh, Lịch Sử, Phim 18+",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME/builds/plugins.json"
+  ]
+}
