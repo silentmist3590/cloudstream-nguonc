@@ -1,8 +1,19 @@
 package com.lagradost
 
+import android.content.Context
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
+import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
+
+@CloudstreamPlugin
+class PhimNguonCPlugin: Plugin() {
+    override fun load(context: Context) {
+        // Đăng ký provider Phim NguonC vào CloudStream
+        registerMainAPI(PhimNguonCProvider())
+    }
+}
 
 class PhimNguonCProvider : MainAPI() {
     override var mainUrl = "https://phim.nguonc.com"
@@ -101,7 +112,6 @@ class PhimNguonCProvider : MainAPI() {
         return true
     }
 
-    // Data Transfer Objects
     data class NguonCPaginate(
         @JsonProperty("current_page") val currentPage: Int?,
         @JsonProperty("total_page") val totalPage: Int?,
