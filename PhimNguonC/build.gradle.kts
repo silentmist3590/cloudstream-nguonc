@@ -1,29 +1,15 @@
-plugins {
-    id("com.android.library")
-    kotlin("android")
-    id("com.lagradost.cloudstream3.gradle")
-}
+version = 1
 
 cloudstream {
-    setRepo(System.getenv("GITHUB_REPOSITORY") ?: "username/cloudstream-nguonc")
-}
-
-android {
-    namespace = "com.lagradost.nguonc"
-    compileSdk = 34
-
-    defaultConfig {
-        minSdk = 21
-    }
-
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
-    }
+    description = "Xem phim từ nguồn phim.nguonc.com trên CloudStream"
+    authors = listOf("silentmist3590")
+    status = 1
+    tvTypes = listOf("Movie", "TvSeries", "AsianDrama", "NSFW")
+    requiresResources = false
+    language = "vi"
+    iconUrl = "https://phim.nguonc.com/favicon.ico"
 }
 
 dependencies {
-    val cloudstream by configurations
-    cloudstream("com.lagradost:cloudstream3:pre-release")
-    implementation(kotlin("stdlib"))
+    implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
 }
