@@ -113,6 +113,7 @@ class PhimNguonCProvider : MainAPI() {
         val embed = (if (parts.size == 2) parts[1] else data).takeIf { it.isNotBlank() }
         val apiM3u8 = (if (parts.size == 2) parts[0] else "").takeIf { it.isNotBlank() }
         val embedRef = embed?.let { originOf(it) } ?: "$mainUrl/"
+        val debug = mutableListOf("plugin v2", "embed=${embed ?: "null"}")
 
         suspend fun emit(url: String, ref: String): Boolean {
             var ok = false
@@ -134,9 +135,13 @@ class PhimNguonCProvider : MainAPI() {
             return ok
         }
 
+        fun head(text: String?): String =
+            text?.trimStart()?.take(70)?.replace(Regex("\\s+"), " ") ?: "null"
+
         // 1) Link m3u8 trực tiếp từ API (nếu có)
         if (apiM3u8 != null && emit(apiM3u8, embedRef)) return true
 
+        var sniffedUrl: String? = null
         if (embed != null) {
             // 2) Trang embed giấu link: mở trong WebView ẩn và bắt yêu cầu .m3u8
             val sniffed = runCatching {
@@ -146,17 +151,25 @@ class PhimNguonCProvider : MainAPI() {
                     interceptor = WebViewResolver(Regex("""\.m3u8"""))
                 ).url
             }.getOrNull()
-            if (sniffed != null && sniffed.contains(".m3u8") && emit(sniffed, embedRef)) {
-                return true
+            debug.add("sniff=${sniffed ?: "null"}")
+            if (sniffed != null && sniffed.contains(".m3u8")) {
+                sniffedUrl = sniffed
+                val probe = runCatching { app.get(sniffed, referer = embedRef) }.getOrNull()
+                debug.add("probe code=${probe?.code} body=${head(probe?.text)}")
+                if (probe?.text?.trimStart()?.startsWith("#EXTM3U") == true &&
+                    emit(sniffed, embedRef)
+                ) return true
             }
 
             // 3) Tìm trực tiếp trong mã nguồn trang embed, chỉ nhận playlist hợp lệ
             val html = runCatching {
                 app.get(embed, referer = "$mainUrl/").text.replace("\\/", "/")
             }.getOrNull()
+            debug.add("html len=${html?.length} head=${head(html)}")
             if (html != null) {
                 val urls = Regex("""https?:[^\s"'<>\\]+?\.m3u8[^\s"'<>\\]*""")
                     .findAll(html).map { it.value }.distinct().toList()
+                debug.add("html m3u8 count=${urls.size} first=${urls.firstOrNull()}")
                 for (u in urls) {
                     val valid = runCatching {
                         app.get(u, referer = embedRef).text.trimStart().startsWith("#EXTM3U")
@@ -168,7 +181,19 @@ class PhimNguonCProvider : MainAPI() {
             // 4) Dự phòng: để CloudStream tự tìm extractor phù hợp
             if (loadExtractor(embed, "$mainUrl/", subtitleCallback, callback)) return true
         }
-        return false
+
+        // Không có link hợp lệ: hiện thông tin chẩn đoán trong danh sách nguồn phát
+        debug.forEach { line ->
+            callback(
+                newExtractorLink(name, "DEBUG $line".take(300), "https://example.invalid/debug.m3u8", ExtractorLinkType.M3U8) {
+                    this.referer = embedRef
+                    this.quality = Qualities.Unknown.value
+                }
+            )
+        }
+        // Giữ lại link bắt được (dù chưa kiểm chứng) để vẫn thử phát
+        sniffedUrl?.let { emit(it, embedRef) }
+        return true
     }
 
     private fun originOf(url: String): String {
