@@ -6,8 +6,9 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
-import com.lagradost.cloudstream3.utils.AppUtils.toJson
+
+// Ngăn cách giữa link m3u8 và link embed trong dữ liệu của mỗi tập
+private const val LINK_SEP = "|||"
 
 @CloudstreamPlugin
 class PhimNguonCPlugin : Plugin() {
@@ -85,7 +86,7 @@ class PhimNguonCProvider : MainAPI() {
                 val m3u8 = ep.m3u8
                 if (!embed.isNullOrBlank() || !m3u8.isNullOrBlank()) {
                     episodes.add(
-                        newEpisode(NguonCLinkData(m3u8, embed).toJson()) {
+                        newEpisode("${m3u8.orEmpty()}$LINK_SEP${embed.orEmpty()}") {
                             this.name = "$serverName - Tập $epName"
                             this.episode = epNum
                         }
@@ -107,10 +108,9 @@ class PhimNguonCProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val link = runCatching { parseJson<NguonCLinkData>(data) }.getOrNull()
-            ?: NguonCLinkData(null, data)
-        val embed = link.embed?.takeIf { it.isNotBlank() }
-        val apiM3u8 = link.m3u8?.takeIf { it.isNotBlank() }
+        val parts = data.split(LINK_SEP, limit = 2)
+        val embed = (if (parts.size == 2) parts[1] else data).takeIf { it.isNotBlank() }
+        val apiM3u8 = (if (parts.size == 2) parts[0] else "").takeIf { it.isNotBlank() }
         val referer = embed?.let { originOf(it) } ?: "$mainUrl/"
         var found = false
 
@@ -153,11 +153,6 @@ class PhimNguonCProvider : MainAPI() {
         val m = Regex("""^(https?://[^/]+)""").find(url)
         return (m?.groupValues?.get(1) ?: mainUrl) + "/"
     }
-
-    data class NguonCLinkData(
-        val m3u8: String?,
-        val embed: String?
-    )
 
     data class NguonCPaginate(
         @JsonProperty("current_page") val currentPage: Int?,
