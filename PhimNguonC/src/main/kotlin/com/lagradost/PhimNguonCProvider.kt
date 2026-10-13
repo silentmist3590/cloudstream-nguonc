@@ -210,15 +210,13 @@ class PhimNguonCProvider : MainAPI() {
             if (found != null && isHls(found) && emit(found)) return finish(true)
         }
 
-        // 3) Dự phòng: mở trang embed trong WebView (giới hạn 25 giây)
+        // 3) Dự phòng: mở trang embed trong WebView (WebViewResolver tự có thời gian chờ)
         val sniffed = runCatching {
-            kotlinx.coroutines.withTimeoutOrNull(25_000L) {
-                app.get(
-                    embed,
-                    referer = "$mainUrl/",
-                    interceptor = WebViewResolver(Regex("""\.m3u8"""))
-                ).url
-            }
+            app.get(
+                embed,
+                referer = "$mainUrl/",
+                interceptor = WebViewResolver(Regex("""\.m3u8"""))
+            ).url
         }.getOrElse {
             note("webview lỗi ${it.javaClass.simpleName} ${it.message?.take(80)}")
             null
