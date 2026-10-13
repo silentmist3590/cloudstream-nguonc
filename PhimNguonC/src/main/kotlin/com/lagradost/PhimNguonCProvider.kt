@@ -156,7 +156,7 @@ class PhimNguonCProvider : MainAPI() {
         fun note(s: String) { log.append(s).append('\n') }
         fun finish(result: Boolean): Boolean {
             copyToClipboard(log.toString())
-            toast("v9: kết quả=$result. Log đã chép vào clipboard, hãy dán vào chat")
+            toast("v10: kết quả=$result. Log đã chép vào clipboard, hãy dán vào chat")
             return result
         }
 
@@ -164,8 +164,8 @@ class PhimNguonCProvider : MainAPI() {
         val embed = (if (parts.size == 2) parts[1] else data).takeIf { it.isNotBlank() }
         val apiM3u8 = (if (parts.size == 2) parts[0] else "").takeIf { it.isNotBlank() }
         val embedRef = embed?.let { originOf(it) } ?: "$mainUrl/"
-        note("v9 m3u8=${apiM3u8?.take(120)}")
-        note("v9 embed=${embed?.take(120)}")
+        note("v10 m3u8=${apiM3u8?.take(120)}")
+        note("v10 embed=${embed?.take(120)}")
 
         // Chỉ coi là hợp lệ khi nội dung thật sự là playlist HLS
         suspend fun isHls(url: String): Boolean {
@@ -189,20 +189,25 @@ class PhimNguonCProvider : MainAPI() {
         if (apiM3u8 != null && isHls(apiM3u8) && emit(apiM3u8)) return finish(true)
         if (embed == null) return finish(false)
 
-        // 2) Gọi thẳng API của trang embed với Origin/Referer của phim.nguonc.com
+        // 2) Đọc trang embed và các file JS của nó để biết cách trình phát lấy link
+        val embedOrigin = embedRef.trimEnd('/')
         val hdr = mapOf("Origin" to mainUrl, "Referer" to "$mainUrl/")
         val page = runCatching { app.get(embed, headers = hdr).text }.getOrNull()
-        note("embed html len=${page?.length} head=${headOf(page, 60)}")
+        note("embed html len=${page?.length}")
+        note("html=${page?.replace(Regex("\\s+"), " ")?.take(2500)}")
         val api = page?.let {
             Regex("\"api\"\\s*:\\s*\"([^\"]+)\"").find(it)?.groupValues?.get(1)?.replace("\\/", "/")
         }
         note("api=${api?.take(120)}")
+
         if (api != null) {
-            val g = runCatching { app.get(api, headers = hdr) }.getOrNull()
-            note("api GET code=${g?.code} body=${headOf(g?.text, 150)}")
-            val p = runCatching { app.post(api, headers = hdr, data = emptyMap()) }.getOrNull()
-            note("api POST code=${p?.code} body=${headOf(p?.text, 150)}")
-            val found = listOfNotNull(g?.text, p?.text).firstNotNullOfOrNull { body ->
+            // Thử POST với Origin là chính trang embed (cùng nguồn)
+            val hdr2 = mapOf("Origin" to embedOrigin, "Referer" to embed)
+            val p1 = runCatching { app.post(api, headers = hdr2, data = emptyMap()) }.getOrNull()
+            note("POST(origin=embed, form) code=${p1?.code} body=${headOf(p1?.text, 150)}")
+            val p2 = runCatching { app.post(api, headers = hdr2, json = emptyMap<String, String>()) }.getOrNull()
+            note("POST(origin=embed, json) code=${p2?.code} body=${headOf(p2?.text, 150)}")
+            val found = listOfNotNull(p1?.text, p2?.text).firstNotNullOfOrNull { body ->
                 Regex("https?:[^\"'\\s\\\\]+\\.m3u8[^\"'\\s\\\\]*")
                     .find(body.replace("\\/", "/"))?.value
             }
@@ -210,20 +215,23 @@ class PhimNguonCProvider : MainAPI() {
             if (found != null && isHls(found) && emit(found)) return finish(true)
         }
 
-        // 3) Dự phòng: mở trang embed trong WebView (WebViewResolver tự có thời gian chờ)
-        val sniffed = runCatching {
-            app.get(
-                embed,
-                referer = "$mainUrl/",
-                interceptor = WebViewResolver(Regex("""\.m3u8"""))
-            ).url
-        }.getOrElse {
-            note("webview lỗi ${it.javaClass.simpleName} ${it.message?.take(80)}")
-            null
-        }
-        note("webview sniff=${sniffed?.take(150)}")
-        if (sniffed != null && sniffed.contains(".m3u8") && isHls(sniffed) && emit(sniffed)) {
-            return finish(true)
+        // Đọc các file JS của trang embed, ghi lại các đoạn liên quan tới origin/fetch/m3u8
+        val scripts = page?.let {
+            Regex("/assets/[A-Za-z0-9._-]+\\.js").findAll(it.replace("\\/", "/")).map { m -> m.value }.distinct().toList()
+        } ?: emptyList()
+        note("scripts=$scripts")
+        for (sp in scripts.take(5)) {
+            val js = runCatching { app.get(embedOrigin + sp, referer = embed).text }.getOrNull()
+            if (js == null) { note("JS $sp: không tải được"); continue }
+            note("JS $sp len=${js.length}")
+            for (kw in listOf("wrong_origin", "origin", "fetch(", "m3u8", "XMLHttpRequest", "atob(", "decrypt", "parent")) {
+                val i = js.indexOf(kw)
+                if (i >= 0) {
+                    val a = maxOf(0, i - 150)
+                    val b = minOf(js.length, i + 250)
+                    note("  [$kw]@$i: ${js.substring(a, b).replace(Regex("\\s+"), " ")}")
+                }
+            }
         }
         return finish(false)
     }
