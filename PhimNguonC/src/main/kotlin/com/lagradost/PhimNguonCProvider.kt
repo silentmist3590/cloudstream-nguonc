@@ -5,19 +5,11 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
-import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.*
-
-// Ngăn cách giữa link m3u8 và link embed trong dữ liệu của mỗi tập
-private const val LINK_SEP = "|||"
-
-// Context của ứng dụng, dùng để hiện thông báo chẩn đoán
-private var appCtx: Context? = null
 
 @CloudstreamPlugin
 class PhimNguonCPlugin : Plugin() {
     override fun load(context: Context) {
-        appCtx = context.applicationContext ?: context
         registerMainAPI(PhimNguonCProvider())
     }
 }
@@ -46,6 +38,13 @@ class PhimNguonCProvider : MainAPI() {
         "danh-sach/phim-le" to "Phim Lẻ"
     )
 
+    // Địa chỉ trang web của phim (dùng cho nút mở trình duyệt trong CloudStream)
+    private fun pageUrl(slug: String) = "$mainUrl/phim/$slug"
+
+    // Lấy slug từ địa chỉ trang web hoặc địa chỉ API cũ (đã lưu trong lịch sử/yêu thích)
+    private fun slugOf(url: String) =
+        url.trimEnd('/').substringAfterLast('/').substringBefore('?')
+
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
@@ -59,7 +58,6 @@ class PhimNguonCProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // Mã hóa từ khóa để tìm được tiếng Việt có dấu và khoảng trắng
         val q = java.net.URLEncoder.encode(query, "UTF-8")
         val url = "$mainUrl/api/films/search?keyword=$q"
         val res = app.get(url).parsedSafe<NguonCListResponse>()
@@ -68,21 +66,24 @@ class PhimNguonCProvider : MainAPI() {
 
     private fun NguonCItem.toSearchResponse(): SearchResponse? {
         val title = name ?: return null
-        val slug = slug ?: return null // bỏ qua mục không có slug
+        val slug = slug ?: return null
         val poster = posterUrl ?: thumbUrl
         val yearInt = year?.toIntOrNull()
-        return newMovieSearchResponse(title, "$mainUrl/api/film/$slug", TvType.Movie) {
+        return newMovieSearchResponse(title, pageUrl(slug), TvType.Movie) {
             this.posterUrl = poster
             this.year = yearInt
         }
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val res = app.get(url).parsedSafe<NguonCDetailResponse>() ?: return null
+        val slug = slugOf(url)
+        if (slug.isBlank()) return null
+        val res = app.get("$mainUrl/api/film/$slug").parsedSafe<NguonCDetailResponse>() ?: return null
         val movie = res.movie ?: return null
         val title = movie.name ?: return null
         val poster = movie.posterUrl ?: movie.thumbUrl
         val desc = movie.description
+        val webUrl = pageUrl(slug)
         val episodes = mutableListOf<Episode>()
 
         movie.episodes?.forEach { server ->
@@ -90,11 +91,10 @@ class PhimNguonCProvider : MainAPI() {
             server.items?.forEach { ep ->
                 val epName = ep.name ?: "1"
                 val epNum = epName.toIntOrNull()
-                val embed = ep.embed
-                val m3u8 = ep.m3u8
-                if (!embed.isNullOrBlank() || !m3u8.isNullOrBlank()) {
+                // Chỉ giữ lại link m3u8 từ API; nếu trống thì tập vẫn hiện nhưng chưa phát được
+                if (!ep.m3u8.isNullOrBlank() || !ep.embed.isNullOrBlank()) {
                     episodes.add(
-                        newEpisode("${m3u8.orEmpty()}$LINK_SEP${embed.orEmpty()}") {
+                        newEpisode(ep.m3u8.orEmpty()) {
                             this.name = "$serverName - Tập $epName"
                             this.episode = epNum
                         }
@@ -103,142 +103,42 @@ class PhimNguonCProvider : MainAPI() {
             }
         }
 
-        // Phim lẻ (chỉ có 1 tập): trả về dạng Movie cho khớp với danh sách
         if (episodes.size == 1) {
-            return newMovieLoadResponse(title, url, TvType.Movie, episodes.first().data) {
+            return newMovieLoadResponse(title, webUrl, TvType.Movie, episodes.first().data) {
                 this.posterUrl = poster
                 this.plot = desc
                 this.year = movie.year
             }
         }
 
-        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+        return newTvSeriesLoadResponse(title, webUrl, TvType.TvSeries, episodes) {
             this.posterUrl = poster
             this.plot = desc
             this.year = movie.year
         }
     }
 
-    private fun headOf(text: String?, n: Int = 70): String =
-        text?.trimStart()?.take(n)?.replace(Regex("\\s+"), " ") ?: "null"
-
-    // Hiện thông báo nổi để xem chẩn đoán khi không có công cụ xem log
-    // (xóa các lệnh toast(...) khi phát hành chính thức)
-    private fun toast(msg: String) {
-        val c = appCtx ?: return
-        runCatching {
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                android.widget.Toast.makeText(c, msg.take(200), android.widget.Toast.LENGTH_LONG).show()
-            }
-        }
-    }
-
-    // Chép log vào clipboard để dán ra chat (không cần kịp đọc thông báo)
-    private fun copyToClipboard(text: String) {
-        val c = appCtx ?: return
-        runCatching {
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                runCatching {
-                    val cm = c.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                    cm.setPrimaryClip(android.content.ClipData.newPlainText("PhimNguonC log", text))
-                }
-            }
-        }
-    }
-
+    // Chỉ phát khi API cung cấp một playlist HLS thật (nội dung bắt đầu bằng #EXTM3U).
+    // Nếu không, trả về false để CloudStream báo "không tìm thấy liên kết" thay vì lỗi trình phát.
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val log = StringBuilder()
-        fun note(s: String) { log.append(s).append('\n') }
-        fun finish(result: Boolean): Boolean {
-            copyToClipboard(log.toString())
-            toast("v10: kết quả=$result. Log đã chép vào clipboard, hãy dán vào chat")
-            return result
-        }
+        if (!data.startsWith("http")) return false
+        val ref = "$mainUrl/"
+        val body = runCatching { app.get(data, referer = ref).text }.getOrNull() ?: return false
+        if (!body.trimStart().startsWith("#EXTM3U")) return false
 
-        val parts = data.split(LINK_SEP, limit = 2)
-        val embed = (if (parts.size == 2) parts[1] else data).takeIf { it.isNotBlank() }
-        val apiM3u8 = (if (parts.size == 2) parts[0] else "").takeIf { it.isNotBlank() }
-        val embedRef = embed?.let { originOf(it) } ?: "$mainUrl/"
-        note("v10 m3u8=${apiM3u8?.take(120)}")
-        note("v10 embed=${embed?.take(120)}")
-
-        // Chỉ coi là hợp lệ khi nội dung thật sự là playlist HLS
-        suspend fun isHls(url: String): Boolean {
-            val r = runCatching { app.get(url, referer = embedRef) }.getOrNull()
-            note("isHls ${url.take(80)} code=${r?.code} nd=${headOf(r?.text, 40)}")
-            return r?.text?.trimStart()?.startsWith("#EXTM3U") == true
-        }
-
-        suspend fun emit(url: String): Boolean {
-            var ok = false
-            runCatching {
-                M3u8Helper.generateM3u8(name, url, embedRef).forEach {
-                    callback(it)
-                    ok = true
-                }
-            }
-            return ok
-        }
-
-        // 1) m3u8 từ API: chỉ dùng nếu kiểm tra ra đúng HLS
-        if (apiM3u8 != null && isHls(apiM3u8) && emit(apiM3u8)) return finish(true)
-        if (embed == null) return finish(false)
-
-        // 2) Đọc trang embed và các file JS của nó để biết cách trình phát lấy link
-        val embedOrigin = embedRef.trimEnd('/')
-        val hdr = mapOf("Origin" to mainUrl, "Referer" to "$mainUrl/")
-        val page = runCatching { app.get(embed, headers = hdr).text }.getOrNull()
-        note("embed html len=${page?.length}")
-        note("html=${page?.replace(Regex("\\s+"), " ")?.take(2500)}")
-        val api = page?.let {
-            Regex("\"api\"\\s*:\\s*\"([^\"]+)\"").find(it)?.groupValues?.get(1)?.replace("\\/", "/")
-        }
-        note("api=${api?.take(120)}")
-
-        if (api != null) {
-            // Thử POST với Origin là chính trang embed (cùng nguồn)
-            val hdr2 = mapOf("Origin" to embedOrigin, "Referer" to embed)
-            val p1 = runCatching { app.post(api, headers = hdr2, data = emptyMap()) }.getOrNull()
-            note("POST(origin=embed, form) code=${p1?.code} body=${headOf(p1?.text, 150)}")
-            val p2 = runCatching { app.post(api, headers = hdr2, json = emptyMap<String, String>()) }.getOrNull()
-            note("POST(origin=embed, json) code=${p2?.code} body=${headOf(p2?.text, 150)}")
-            val found = listOfNotNull(p1?.text, p2?.text).firstNotNullOfOrNull { body ->
-                Regex("https?:[^\"'\\s\\\\]+\\.m3u8[^\"'\\s\\\\]*")
-                    .find(body.replace("\\/", "/"))?.value
-            }
-            note("m3u8 trong api=${found?.take(150)}")
-            if (found != null && isHls(found) && emit(found)) return finish(true)
-        }
-
-        // Đọc các file JS của trang embed, ghi lại các đoạn liên quan tới origin/fetch/m3u8
-        val scripts = page?.let {
-            Regex("/assets/[A-Za-z0-9._-]+\\.js").findAll(it.replace("\\/", "/")).map { m -> m.value }.distinct().toList()
-        } ?: emptyList()
-        note("scripts=$scripts")
-        for (sp in scripts.take(5)) {
-            val js = runCatching { app.get(embedOrigin + sp, referer = embed).text }.getOrNull()
-            if (js == null) { note("JS $sp: không tải được"); continue }
-            note("JS $sp len=${js.length}")
-            for (kw in listOf("wrong_origin", "origin", "fetch(", "m3u8", "XMLHttpRequest", "atob(", "decrypt", "parent")) {
-                val i = js.indexOf(kw)
-                if (i >= 0) {
-                    val a = maxOf(0, i - 150)
-                    val b = minOf(js.length, i + 250)
-                    note("  [$kw]@$i: ${js.substring(a, b).replace(Regex("\\s+"), " ")}")
-                }
+        var ok = false
+        runCatching {
+            M3u8Helper.generateM3u8(name, data, ref).forEach {
+                callback(it)
+                ok = true
             }
         }
-        return finish(false)
-    }
-
-    private fun originOf(url: String): String {
-        val m = Regex("""^(https?://[^/]+)""").find(url)
-        return (m?.groupValues?.get(1) ?: mainUrl) + "/"
+        return ok
     }
 
     data class NguonCPaginate(
