@@ -1,4 +1,4 @@
-version = 8
+version = 9
 
 cloudstream {
     description = "Xem phim từ nguồn phim.nguonc.com trên CloudStream"
