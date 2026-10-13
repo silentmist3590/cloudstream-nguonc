@@ -1,17 +1,11 @@
 package com.lagradost
 
 import android.content.Context
-import android.webkit.JavascriptInterface
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import android.widget.Toast
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlin.coroutines.resume
 
 private const val LINK_SEP = "|||"
 private var appCtx: Context? = null
@@ -71,9 +65,12 @@ class PhimNguonCProvider : MainAPI() {
         val title = name ?: return null
         val slug = slug ?: return null
         val poster = posterUrl ?: thumbUrl
+        // Đưa toIntOrNull ra ngoài khối builder để tránh lỗi scope
+        val yearInt = year?.toIntOrNull()
+
         return newMovieSearchResponse(title, "$mainUrl/api/film/$slug", TvType.Movie) {
             this.posterUrl = poster
-            this.year = year?.toIntOrNull()
+            this.year = yearInt
         }
     }
 
@@ -117,76 +114,6 @@ class PhimNguonCProvider : MainAPI() {
         }
     }
 
-    class FetchBridge(val onDataCaptured: (String) -> Unit) {
-        @JavascriptInterface
-        fun postMessage(data: String) {
-            onDataCaptured(data)
-        }
-    }
-
-    private suspend fun getStreamLinkViaFetchHook(context: Context, embedUrl: String, mainUrl: String): String? =
-        suspendCancellableCoroutine { continuation ->
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                val webView = WebView(context).apply {
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.mediaPlaybackRequiresUserGesture = false
-                }
-
-                var isResumed = false
-
-                webView.addJavascriptInterface(FetchBridge { capturedData ->
-                    if (!isResumed && (capturedData.contains(".m3u8") || capturedData.contains("manifest"))) {
-                        isResumed = true
-                        if (continuation.isActive) {
-                            continuation.resume(capturedData)
-                        }
-                    }
-                }, "AndroidBridge")
-
-                webView.webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView?, url: String?) {
-                        super.onPageFinished(view, url)
-                        val jsHook = """
-                            (function() {
-                                if (window.fetchHooked) return;
-                                window.fetchHooked = true;
-                                const originalFetch = window.fetch;
-                                window.fetch = async function(...args) {
-                                    const [resource, config] = args;
-                                    const response = await originalFetch.apply(this, args);
-                                    try {
-                                        const clone = response.clone();
-                                        const text = await clone.text();
-                                        if (text.includes('.m3u8') || text.includes('playlist')) {
-                                            AndroidBridge.postMessage(text);
-                                        }
-                                        if (typeof resource === 'string' && resource.includes('.m3u8')) {
-                                            AndroidBridge.postMessage(resource);
-                                        }
-                                    } catch(e) {}
-                                    return response;
-                                };
-                            })();
-                        """.trimIndent()
-                        view?.evaluateJavascript(jsHook, null)
-                    }
-                }
-
-                val htmlContent = """
-                    <!DOCTYPE html>
-                    <html>
-                    <head><meta charset="utf-8"></head>
-                    <body style="margin:0;background:#000;">
-                        <iframe src="$embedUrl" style="width:100%;height:100vh;border:none;" allowfullscreen></iframe>
-                    </body>
-                    </html>
-                """.trimIndent()
-
-                webView.loadDataWithBaseURL(mainUrl, htmlContent, "text/html", "UTF-8", null)
-            }
-        }
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -214,20 +141,10 @@ class PhimNguonCProvider : MainAPI() {
             return ok
         }
 
-        // 1) Thử m3u8 từ API trước
         if (apiM3u8 != null && isHls(apiM3u8) && emit(apiM3u8)) return true
 
-        // 2) Nếu không có hoặc lỗi, sử dụng WebView Hook vượt kiểm tra origin của embed
         if (embed != null) {
-            val context = appCtx
-            if (context != null) {
-                val sniffed = getStreamLinkViaFetchHook(context, embed, mainUrl)
-                if (!sniffed.isNullOrBlank()) {
-                    if (sniffed.startsWith("http") && (sniffed.contains(".m3u8") || sniffed.contains("manifest"))) {
-                        if (emit(sniffed)) return true
-                    }
-                }
-            }
+            loadExtractor(embed, embedRef, subtitleCallback, callback)
         }
 
         return false
