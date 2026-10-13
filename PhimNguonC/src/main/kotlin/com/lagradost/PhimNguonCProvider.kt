@@ -106,7 +106,7 @@ class PhimNguonCProvider : MainAPI() {
                 .onFailure { dbg.add("error=${it.javaClass.simpleName}: ${it.message?.take(100)}") }
         }
         // Phần mô tả được hiển thị dạng HTML nên phải thay < > và xuống dòng bằng <br>
-        val debugText = ("[DEBUG v5]\n" + dbg.joinToString("\n"))
+        val debugText = ("[DEBUG v6]\n" + dbg.joinToString("\n"))
             .replace("<", "‹").replace(">", "›").replace("\n", "<br>") + "<br><br>"
 
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
@@ -157,6 +157,49 @@ class PhimNguonCProvider : MainAPI() {
                 .filter { it.isNotEmpty() && keyRegex.containsMatchIn(it) }
                 .take(14).map { it.take(220) }
             debug.add("html key lines:\n" + keyLines.joinToString("\n"))
+            runCatching {
+                val boot = Regex("""id="stream-bootstrap"[^>]*>(.*?)</script>""", RegexOption.DOT_MATCHES_ALL)
+                    .find(html)?.groupValues?.get(1)
+                debug.add("bootstrap=" + (boot ?: "null").take(1200))
+
+                val hdr = mapOf(
+                    "X-Requested-With" to "XMLHttpRequest",
+                    "Accept" to "application/json, text/plain, */*"
+                )
+                val g = runCatching { app.get(embed, referer = embed, headers = hdr, timeout = 8L) }.getOrNull()
+                debug.add("apiGET code=${g?.code} body=${headOf(g?.text, 300)}")
+                val po = runCatching { app.post(embed, referer = embed, headers = hdr, timeout = 8L) }.getOrNull()
+                debug.add("apiPOST code=${po?.code} body=${headOf(po?.text, 300)}")
+                for (t in listOf(g?.text, po?.text)) {
+                    val u = t?.replace("\\/", "/")
+                        ?.let { Regex("""https?://[^\s"'<>\\]+?\.m3u8[^\s"'<>\\]*""").find(it)?.value }
+                    if (u != null) {
+                        val ok = runCatching {
+                            app.get(u, referer = embedRef).text.trimStart().startsWith("#EXTM3U")
+                        }.getOrDefault(false)
+                        debug.add("api m3u8=$u valid=$ok")
+                        if (ok) return u to sniffedUrl
+                    }
+                }
+
+                val srcs = Regex("""<script[^>]+src="([^"]+)"""").findAll(html)
+                    .map { it.groupValues[1] }
+                    .filter { !it.contains("jwplayer") && !it.contains("cdn-cgi") }
+                    .take(2).toList()
+                for (src in srcs) {
+                    val full = if (src.startsWith("http")) src else originOf(embed).trimEnd('/') + src
+                    val js = runCatching { app.get(full, referer = embed, timeout = 8L).text }.getOrNull()
+                    debug.add("js $src len=${js?.length}")
+                    if (js != null) {
+                        val re = Regex("fetch\\(|XMLHttpRequest|atob\\(|\\.m3u8|sources|X-Requested")
+                        re.findAll(js).take(6).forEach {
+                            val a = maxOf(0, it.range.first - 120)
+                            val b = minOf(js.length, it.range.last + 160)
+                            debug.add("js> " + js.substring(a, b).replace(Regex("\\s+"), " "))
+                        }
+                    }
+                }
+            }
             val others = Regex("""https?://[^\s"'<>\\]+""").findAll(html)
                 .map { it.value }.distinct().take(8).toList()
             debug.add("html urls=${others.joinToString(" ; ")}")
@@ -180,7 +223,7 @@ class PhimNguonCProvider : MainAPI() {
         val embed = (if (parts.size == 2) parts[1] else data).takeIf { it.isNotBlank() }
         val apiM3u8 = (if (parts.size == 2) parts[0] else "").takeIf { it.isNotBlank() }
         val embedRef = embed?.let { originOf(it) } ?: "$mainUrl/"
-        val debug = mutableListOf("plugin v5", "embed=${embed ?: "null"}")
+        val debug = mutableListOf("plugin v6", "embed=${embed ?: "null"}")
 
         suspend fun emit(url: String, ref: String): Boolean {
             var ok = false
