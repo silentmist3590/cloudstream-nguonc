@@ -59,13 +59,16 @@ class PhimNguonCProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val url = "$mainUrl/api/films/search?keyword=$query"
+        // Mã hóa từ khóa để tìm được tiếng Việt có dấu và khoảng trắng
+        val q = java.net.URLEncoder.encode(query, "UTF-8")
+        val url = "$mainUrl/api/films/search?keyword=$q"
         val res = app.get(url).parsedSafe<NguonCListResponse>()
         return res?.items?.mapNotNull { it.toSearchResponse() } ?: emptyList()
     }
 
     private fun NguonCItem.toSearchResponse(): SearchResponse? {
         val title = name ?: return null
+        val slug = slug ?: return null // bỏ qua mục không có slug
         val poster = posterUrl ?: thumbUrl
         val yearInt = year?.toIntOrNull()
         return newMovieSearchResponse(title, "$mainUrl/api/film/$slug", TvType.Movie) {
@@ -100,6 +103,15 @@ class PhimNguonCProvider : MainAPI() {
             }
         }
 
+        // Phim lẻ (chỉ có 1 tập): trả về dạng Movie cho khớp với danh sách
+        if (episodes.size == 1) {
+            return newMovieLoadResponse(title, url, TvType.Movie, episodes.first().data) {
+                this.posterUrl = poster
+                this.plot = desc
+                this.year = movie.year
+            }
+        }
+
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
             this.posterUrl = poster
             this.plot = desc
@@ -111,6 +123,7 @@ class PhimNguonCProvider : MainAPI() {
         text?.trimStart()?.take(n)?.replace(Regex("\\s+"), " ") ?: "null"
 
     // Hiện thông báo nổi để xem chẩn đoán khi không có công cụ xem log
+    // (xóa các lệnh toast(...) khi phát hành chính thức)
     private fun toast(msg: String) {
         val c = appCtx ?: return
         runCatching {
@@ -131,33 +144,31 @@ class PhimNguonCProvider : MainAPI() {
         val apiM3u8 = (if (parts.size == 2) parts[0] else "").takeIf { it.isNotBlank() }
         val embedRef = embed?.let { originOf(it) } ?: "$mainUrl/"
 
-        suspend fun emit(url: String, ref: String): Boolean {
+        // Chỉ coi là hợp lệ khi nội dung thật sự là playlist HLS
+        suspend fun isHls(url: String): Boolean {
+            val r = runCatching { app.get(url, referer = embedRef) }.getOrNull()
+            toast("v8: ${url.take(50)} code=${r?.code} nd=${headOf(r?.text, 40)}")
+            return r?.text?.trimStart()?.startsWith("#EXTM3U") == true
+        }
+
+        // Không còn phương án dự phòng "cứ đưa link cho player"
+        suspend fun emit(url: String): Boolean {
             var ok = false
             runCatching {
-                M3u8Helper.generateM3u8(name, url, ref).forEach {
+                M3u8Helper.generateM3u8(name, url, embedRef).forEach {
                     callback(it)
                     ok = true
                 }
             }
-            if (!ok) {
-                callback(
-                    newExtractorLink(name, name, url, ExtractorLinkType.M3U8) {
-                        this.referer = ref
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
-                ok = true
-            }
             return ok
         }
 
-        // 1) Link m3u8 trực tiếp từ API (nếu có)
-        if (apiM3u8 != null && emit(apiM3u8, embedRef)) return true
+        // 1) m3u8 từ API: chỉ dùng nếu kiểm tra ra đúng HLS
+        if (apiM3u8 != null && isHls(apiM3u8) && emit(apiM3u8)) return true
         if (embed == null) return false
 
-        // 2) Trang embed mã hóa dữ liệu và tự giải mã bằng JS: cho nó chạy trong WebView
-        //    thật rồi bắt yêu cầu .m3u8 mà player phát ra.
-        toast("v7: đang mở trang phát trong WebView...")
+        // 2) Mở trang embed trong WebView và bắt yêu cầu .m3u8
+        toast("v8: đang mở trang phát trong WebView...")
         val sniffed = runCatching {
             app.get(
                 embed,
@@ -165,22 +176,15 @@ class PhimNguonCProvider : MainAPI() {
                 interceptor = WebViewResolver(Regex("""\.m3u8"""))
             ).url
         }.getOrElse {
-            toast("v7 lỗi WebView: ${it.javaClass.simpleName} ${it.message?.take(80)}")
+            toast("v8 lỗi WebView: ${it.javaClass.simpleName} ${it.message?.take(80)}")
             null
         }
         if (sniffed == null || !sniffed.contains(".m3u8")) {
-            toast("v7: không bắt được .m3u8. sniff=${sniffed?.take(120)}")
+            toast("v8: không bắt được .m3u8. sniff=${sniffed?.take(120)}")
             return false
         }
-        toast("v7: bắt được ${sniffed.take(150)}")
-
-        val probe = runCatching { app.get(sniffed, referer = embedRef) }.getOrNull()
-        val body = probe?.text
-        toast("v7: kiểm tra link code=${probe?.code} nội dung=${headOf(body, 60)}")
-        if (body?.trimStart()?.startsWith("#EXTM3U") == true) {
-            return emit(sniffed, embedRef)
-        }
-        return false
+        toast("v8: bắt được ${sniffed.take(120)}")
+        return isHls(sniffed) && emit(sniffed)
     }
 
     private fun originOf(url: String): String {
