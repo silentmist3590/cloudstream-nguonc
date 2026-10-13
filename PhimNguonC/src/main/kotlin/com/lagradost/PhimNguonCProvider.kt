@@ -105,7 +105,9 @@ class PhimNguonCProvider : MainAPI() {
             runCatching { findStream(firstEmbed, originOf(firstEmbed), dbg, useWebView = false) }
                 .onFailure { dbg.add("error=${it.javaClass.simpleName}: ${it.message?.take(100)}") }
         }
-        val debugText = "[DEBUG v4]\n" + dbg.joinToString("\n") + "\n\n"
+        // Phần mô tả được hiển thị dạng HTML nên phải thay < > và xuống dòng bằng <br>
+        val debugText = ("[DEBUG v5]\n" + dbg.joinToString("\n"))
+            .replace("<", "‹").replace(">", "›").replace("\n", "<br>") + "<br><br>"
 
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
             this.posterUrl = poster
@@ -150,6 +152,11 @@ class PhimNguonCProvider : MainAPI() {
             val urls = Regex("""https?:[^\s"'<>\\]+?\.m3u8[^\s"'<>\\]*""")
                 .findAll(html).map { it.value }.distinct().toList()
             debug.add("html m3u8 count=${urls.size} first=${urls.firstOrNull()}")
+            val keyRegex = Regex("(?i)fetch|ajax|api|source|m3u8|hls|\\.php|src=|file")
+            val keyLines = html.lines().map { it.trim() }
+                .filter { it.isNotEmpty() && keyRegex.containsMatchIn(it) }
+                .take(14).map { it.take(220) }
+            debug.add("html key lines:\n" + keyLines.joinToString("\n"))
             val others = Regex("""https?://[^\s"'<>\\]+""").findAll(html)
                 .map { it.value }.distinct().take(8).toList()
             debug.add("html urls=${others.joinToString(" ; ")}")
@@ -173,7 +180,7 @@ class PhimNguonCProvider : MainAPI() {
         val embed = (if (parts.size == 2) parts[1] else data).takeIf { it.isNotBlank() }
         val apiM3u8 = (if (parts.size == 2) parts[0] else "").takeIf { it.isNotBlank() }
         val embedRef = embed?.let { originOf(it) } ?: "$mainUrl/"
-        val debug = mutableListOf("plugin v4", "embed=${embed ?: "null"}")
+        val debug = mutableListOf("plugin v5", "embed=${embed ?: "null"}")
 
         suspend fun emit(url: String, ref: String): Boolean {
             var ok = false
