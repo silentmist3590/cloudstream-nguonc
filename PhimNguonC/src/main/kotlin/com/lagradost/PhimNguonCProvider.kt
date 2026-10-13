@@ -5,6 +5,7 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
+import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.*
 
 // Ngăn cách giữa link m3u8 và link embed trong dữ liệu của mỗi tập
@@ -111,42 +112,63 @@ class PhimNguonCProvider : MainAPI() {
         val parts = data.split(LINK_SEP, limit = 2)
         val embed = (if (parts.size == 2) parts[1] else data).takeIf { it.isNotBlank() }
         val apiM3u8 = (if (parts.size == 2) parts[0] else "").takeIf { it.isNotBlank() }
-        val referer = embed?.let { originOf(it) } ?: "$mainUrl/"
-        var found = false
+        val embedRef = embed?.let { originOf(it) } ?: "$mainUrl/"
 
-        // 1) Link m3u8 trực tiếp từ API
-        // 2) Nếu không có, thử tìm m3u8 bên trong trang embed
-        val m3u8: String? = if (apiM3u8 == null && embed != null) {
+        suspend fun emit(url: String, ref: String): Boolean {
+            var ok = false
             runCatching {
-                val html = app.get(embed, referer = "$mainUrl/").text
-                Regex("""https?:[^\s"'<>\\]+?\.m3u8[^\s"'<>\\]*""")
-                    .find(html.replace("\\/", "/"))?.value
-            }.getOrNull()
-        } else apiM3u8
-
-        if (m3u8 != null) {
-            runCatching {
-                M3u8Helper.generateM3u8(name, m3u8, referer).forEach {
+                M3u8Helper.generateM3u8(name, url, ref).forEach {
                     callback(it)
-                    found = true
+                    ok = true
                 }
             }
-            if (!found) {
+            if (!ok) {
                 callback(
-                    newExtractorLink(name, name, m3u8, ExtractorLinkType.M3U8) {
-                        this.referer = referer
+                    newExtractorLink(name, name, url, ExtractorLinkType.M3U8) {
+                        this.referer = ref
                         this.quality = Qualities.Unknown.value
                     }
                 )
-                found = true
+                ok = true
             }
+            return ok
         }
 
-        // 3) Dự phòng: để CloudStream tự tìm extractor phù hợp với link embed
-        if (!found && embed != null) {
-            found = loadExtractor(embed, "$mainUrl/", subtitleCallback, callback)
+        // 1) Link m3u8 trực tiếp từ API (nếu có)
+        if (apiM3u8 != null && emit(apiM3u8, embedRef)) return true
+
+        if (embed != null) {
+            // 2) Trang embed giấu link: mở trong WebView ẩn và bắt yêu cầu .m3u8
+            val sniffed = runCatching {
+                app.get(
+                    embed,
+                    referer = "$mainUrl/",
+                    interceptor = WebViewResolver(Regex("""\.m3u8"""))
+                ).url
+            }.getOrNull()
+            if (sniffed != null && sniffed.contains(".m3u8") && emit(sniffed, embedRef)) {
+                return true
+            }
+
+            // 3) Tìm trực tiếp trong mã nguồn trang embed, chỉ nhận playlist hợp lệ
+            val html = runCatching {
+                app.get(embed, referer = "$mainUrl/").text.replace("\\/", "/")
+            }.getOrNull()
+            if (html != null) {
+                val urls = Regex("""https?:[^\s"'<>\\]+?\.m3u8[^\s"'<>\\]*""")
+                    .findAll(html).map { it.value }.distinct().toList()
+                for (u in urls) {
+                    val valid = runCatching {
+                        app.get(u, referer = embedRef).text.trimStart().startsWith("#EXTM3U")
+                    }.getOrDefault(false)
+                    if (valid && emit(u, embedRef)) return true
+                }
+            }
+
+            // 4) Dự phòng: để CloudStream tự tìm extractor phù hợp
+            if (loadExtractor(embed, "$mainUrl/", subtitleCallback, callback)) return true
         }
-        return found
+        return false
     }
 
     private fun originOf(url: String): String {
