@@ -60,6 +60,8 @@ subprojects {
         val implementation by configurations
         cloudstream("com.lagradost:cloudstream3:pre-release")
         implementation(kotlin("stdlib"))
+        // Thư viện HTTP (app.get...) không còn đi kèm cloudstream.jar nên phải khai báo riêng
+        implementation("com.github.Blatzar:NiceHttp:0.4.18")
         implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
     }
 }
