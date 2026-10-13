@@ -62,6 +62,7 @@ subprojects {
         implementation(kotlin("stdlib"))
         // Thư viện HTTP (app.get...) không còn đi kèm cloudstream.jar nên phải khai báo riêng
         implementation("com.github.Blatzar:NiceHttp:0.4.18")
+        implementation("com.squareup.okhttp3:okhttp:4.12.0")
         implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
     }
 }
