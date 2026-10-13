@@ -1,15 +1,25 @@
 package com.lagradost
 
 import android.content.Context
+import android.webkit.JavascriptInterface
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.Toast
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+
+private const val LINK_SEP = "|||"
+private var appCtx: Context? = null
 
 @CloudstreamPlugin
 class PhimNguonCPlugin : Plugin() {
     override fun load(context: Context) {
+        appCtx = context.applicationContext ?: context
         registerMainAPI(PhimNguonCProvider())
     }
 }
@@ -38,13 +48,6 @@ class PhimNguonCProvider : MainAPI() {
         "danh-sach/phim-le" to "Phim Lẻ"
     )
 
-    // Địa chỉ trang web của phim (dùng cho nút mở trình duyệt trong CloudStream)
-    private fun pageUrl(slug: String) = "$mainUrl/phim/$slug"
-
-    // Lấy slug từ địa chỉ trang web hoặc địa chỉ API cũ (đã lưu trong lịch sử/yêu thích)
-    private fun slugOf(url: String) =
-        url.trimEnd('/').substringAfterLast('/').substringBefore('?')
-
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
@@ -68,35 +71,31 @@ class PhimNguonCProvider : MainAPI() {
         val title = name ?: return null
         val slug = slug ?: return null
         val poster = posterUrl ?: thumbUrl
-        val yearInt = year?.toIntOrNull()
-        return newMovieSearchResponse(title, pageUrl(slug), TvType.Movie) {
+        return newMovieSearchResponse(title, "$mainUrl/api/film/$slug", TvType.Movie) {
             this.posterUrl = poster
-            this.year = yearInt
+            this.year = year?.toIntOrNull()
         }
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val slug = slugOf(url)
-        if (slug.isBlank()) return null
-        val res = app.get("$mainUrl/api/film/$slug").parsedSafe<NguonCDetailResponse>() ?: return null
+        val res = app.get(url).parsedSafe<NguonCDetailResponse>() ?: return null
         val movie = res.movie ?: return null
         val title = movie.name ?: return null
         val poster = movie.posterUrl ?: movie.thumbUrl
         val desc = movie.description
-        val webUrl = pageUrl(slug)
         val episodes = mutableListOf<Episode>()
 
         movie.episodes?.forEach { server ->
             val serverName = server.serverName ?: "NguonC"
             server.items?.forEach { ep ->
                 val epName = ep.name ?: "1"
-                val epNum = epName.toIntOrNull()
-                // Chỉ giữ lại link m3u8 từ API; nếu trống thì tập vẫn hiện nhưng chưa phát được
-                if (!ep.m3u8.isNullOrBlank() || !ep.embed.isNullOrBlank()) {
+                val embed = ep.embed
+                val m3u8 = ep.m3u8
+                if (!embed.isNullOrBlank() || !m3u8.isNullOrBlank()) {
                     episodes.add(
-                        newEpisode(ep.m3u8.orEmpty()) {
+                        newEpisode("${m3u8.orEmpty()}$LINK_SEP${embed.orEmpty()}") {
                             this.name = "$serverName - Tập $epName"
-                            this.episode = epNum
+                            this.episode = epName.toIntOrNull()
                         }
                     )
                 }
@@ -104,43 +103,142 @@ class PhimNguonCProvider : MainAPI() {
         }
 
         if (episodes.size == 1) {
-            return newMovieLoadResponse(title, webUrl, TvType.Movie, episodes.first().data) {
+            return newMovieLoadResponse(title, url, TvType.Movie, episodes.first().data) {
                 this.posterUrl = poster
                 this.plot = desc
                 this.year = movie.year
             }
         }
 
-        return newTvSeriesLoadResponse(title, webUrl, TvType.TvSeries, episodes) {
+        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
             this.posterUrl = poster
             this.plot = desc
             this.year = movie.year
         }
     }
 
-    // Chỉ phát khi API cung cấp một playlist HLS thật (nội dung bắt đầu bằng #EXTM3U).
-    // Nếu không, trả về false để CloudStream báo "không tìm thấy liên kết" thay vì lỗi trình phát.
+    class FetchBridge(val onDataCaptured: (String) -> Unit) {
+        @JavascriptInterface
+        fun postMessage(data: String) {
+            onDataCaptured(data)
+        }
+    }
+
+    private suspend fun getStreamLinkViaFetchHook(context: Context, embedUrl: String, mainUrl: String): String? =
+        suspendCancellableCoroutine { continuation ->
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                val webView = WebView(context).apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.mediaPlaybackRequiresUserGesture = false
+                }
+
+                var isResumed = false
+
+                webView.addJavascriptInterface(FetchBridge { capturedData ->
+                    if (!isResumed && (capturedData.contains(".m3u8") || capturedData.contains("manifest"))) {
+                        isResumed = true
+                        if (continuation.isActive) {
+                            continuation.resume(capturedData)
+                        }
+                    }
+                }, "AndroidBridge")
+
+                webView.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        super.onPageFinished(view, url)
+                        val jsHook = """
+                            (function() {
+                                if (window.fetchHooked) return;
+                                window.fetchHooked = true;
+                                const originalFetch = window.fetch;
+                                window.fetch = async function(...args) {
+                                    const [resource, config] = args;
+                                    const response = await originalFetch.apply(this, args);
+                                    try {
+                                        const clone = response.clone();
+                                        const text = await clone.text();
+                                        if (text.includes('.m3u8') || text.includes('playlist')) {
+                                            AndroidBridge.postMessage(text);
+                                        }
+                                        if (typeof resource === 'string' && resource.includes('.m3u8')) {
+                                            AndroidBridge.postMessage(resource);
+                                        }
+                                    } catch(e) {}
+                                    return response;
+                                };
+                            })();
+                        """.trimIndent()
+                        view?.evaluateJavascript(jsHook, null)
+                    }
+                }
+
+                val htmlContent = """
+                    <!DOCTYPE html>
+                    <html>
+                    <head><meta charset="utf-8"></head>
+                    <body style="margin:0;background:#000;">
+                        <iframe src="$embedUrl" style="width:100%;height:100vh;border:none;" allowfullscreen></iframe>
+                    </body>
+                    </html>
+                """.trimIndent()
+
+                webView.loadDataWithBaseURL(mainUrl, htmlContent, "text/html", "UTF-8", null)
+            }
+        }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        if (!data.startsWith("http")) return false
-        val ref = "$mainUrl/"
-        val body = runCatching { app.get(data, referer = ref).text }.getOrNull() ?: return false
-        if (!body.trimStart().startsWith("#EXTM3U")) return false
+        val parts = data.split(LINK_SEP, limit = 2)
+        val embed = (if (parts.size == 2) parts[1] else data).takeIf { it.isNotBlank() }
+        val apiM3u8 = (if (parts.size == 2) parts[0] else "").takeIf { it.isNotBlank() }
+        val embedRef = embed?.let { originOf(it) } ?: "$mainUrl/"
 
-        var ok = false
-        runCatching {
-            M3u8Helper.generateM3u8(name, data, ref).forEach {
-                callback(it)
-                ok = true
+        suspend fun isHls(url: String): Boolean {
+            val r = runCatching { app.get(url, referer = embedRef) }.getOrNull()
+            return r?.text?.trimStart()?.startsWith("#EXTM3U") == true
+        }
+
+        suspend fun emit(url: String): Boolean {
+            var ok = false
+            runCatching {
+                M3u8Helper.generateM3u8(name, url, embedRef).forEach {
+                    callback(it)
+                    ok = true
+                }
+            }
+            return ok
+        }
+
+        // 1) Thử m3u8 từ API trước
+        if (apiM3u8 != null && isHls(apiM3u8) && emit(apiM3u8)) return true
+
+        // 2) Nếu không có hoặc lỗi, sử dụng WebView Hook vượt kiểm tra origin của embed
+        if (embed != null) {
+            val context = appCtx
+            if (context != null) {
+                val sniffed = getStreamLinkViaFetchHook(context, embed, mainUrl)
+                if (!sniffed.isNullOrBlank()) {
+                    if (sniffed.startsWith("http") && (sniffed.contains(".m3u8") || sniffed.contains("manifest"))) {
+                        if (emit(sniffed)) return true
+                    }
+                }
             }
         }
-        return ok
+
+        return false
     }
 
+    private fun originOf(url: String): String {
+        val m = Regex("""^(https?://[^/]+)""").find(url)
+        return (m?.groupValues?.get(1) ?: mainUrl) + "/"
+    }
+
+    // --- Data Classes ---
     data class NguonCPaginate(
         @JsonProperty("current_page") val currentPage: Int?,
         @JsonProperty("total_page") val totalPage: Int?,
