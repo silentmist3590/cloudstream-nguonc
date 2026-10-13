@@ -45,12 +45,12 @@ subprojects {
             targetSdk = 35
         }
         compileOptions {
-            sourceCompatibility = JavaVersion.VERSION_1_8
-            targetCompatibility = JavaVersion.VERSION_1_8
+            sourceCompatibility = JavaVersion.VERSION_11
+            targetCompatibility = JavaVersion.VERSION_11
         }
         tasks.withType<KotlinJvmCompile> {
             compilerOptions {
-                jvmTarget.set(JvmTarget.JVM_1_8)
+                jvmTarget.set(JvmTarget.JVM_11)
             }
         }
     }
@@ -60,8 +60,6 @@ subprojects {
         val implementation by configurations
         cloudstream("com.lagradost:cloudstream3:pre-release")
         implementation(kotlin("stdlib"))
-        implementation("com.github.Blatzar:NiceHttp:0.4.11") // thư viện HTTP, chứa lớp Requests
-        implementation("org.jsoup:jsoup:1.17.2")              // parse HTML (nếu code có dùng)
         implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
     }
 }
