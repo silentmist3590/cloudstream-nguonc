@@ -96,11 +96,70 @@ class PhimNguonCProvider : MainAPI() {
             }
         }
 
+        // TẠM THỜI: chẩn đoán trên tập đầu tiên, hiển thị trong phần mô tả
+        val dbg = mutableListOf<String>()
+        val firstEmbed = movie.episodes?.flatMap { it.items.orEmpty() }
+            ?.firstOrNull { !it.embed.isNullOrBlank() }?.embed
+        if (firstEmbed != null) {
+            dbg.add("embed=$firstEmbed")
+            runCatching { findStream(firstEmbed, originOf(firstEmbed), dbg) }
+                .onFailure { dbg.add("error=${it.javaClass.simpleName}: ${it.message?.take(100)}") }
+        }
+        val debugText = "[DEBUG v3]\n" + dbg.joinToString("\n") + "\n\n"
+
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
             this.posterUrl = poster
-            this.plot = desc
+            this.plot = debugText + (desc ?: "")
             this.year = movie.year
         }
+    }
+
+    private fun headOf(text: String?, n: Int = 70): String =
+        text?.trimStart()?.take(n)?.replace(Regex("\\s+"), " ") ?: "null"
+
+    // Trả về (link m3u8 hợp lệ, link bắt được dù chưa hợp lệ) và ghi chẩn đoán vào debug
+    private suspend fun findStream(
+        embed: String,
+        embedRef: String,
+        debug: MutableList<String>
+    ): Pair<String?, String?> {
+        var sniffedUrl: String? = null
+        val sniffed = runCatching {
+            app.get(
+                embed,
+                referer = "$mainUrl/",
+                interceptor = WebViewResolver(Regex("""\.m3u8"""))
+            ).url
+        }.getOrElse {
+            debug.add("sniff error=${it.javaClass.simpleName}: ${it.message?.take(100)}")
+            null
+        }
+        debug.add("sniff=${sniffed ?: "null"}")
+        if (sniffed != null && sniffed.contains(".m3u8")) {
+            sniffedUrl = sniffed
+            val probe = runCatching { app.get(sniffed, referer = embedRef) }.getOrNull()
+            debug.add("probe code=${probe?.code} body=${headOf(probe?.text)}")
+            if (probe?.text?.trimStart()?.startsWith("#EXTM3U") == true) return sniffed to sniffed
+        }
+        val html = runCatching {
+            app.get(embed, referer = "$mainUrl/").text.replace("\\/", "/")
+        }.getOrNull()
+        debug.add("html len=${html?.length} head=${headOf(html, 200)}")
+        if (html != null) {
+            val urls = Regex("""https?:[^\s"'<>\\]+?\.m3u8[^\s"'<>\\]*""")
+                .findAll(html).map { it.value }.distinct().toList()
+            debug.add("html m3u8 count=${urls.size} first=${urls.firstOrNull()}")
+            val others = Regex("""https?://[^\s"'<>\\]+""").findAll(html)
+                .map { it.value }.distinct().take(8).toList()
+            debug.add("html urls=${others.joinToString(" ; ")}")
+            for (u in urls) {
+                val ok = runCatching {
+                    app.get(u, referer = embedRef).text.trimStart().startsWith("#EXTM3U")
+                }.getOrDefault(false)
+                if (ok) return u to sniffedUrl
+            }
+        }
+        return null to sniffedUrl
     }
 
     override suspend fun loadLinks(
@@ -113,7 +172,7 @@ class PhimNguonCProvider : MainAPI() {
         val embed = (if (parts.size == 2) parts[1] else data).takeIf { it.isNotBlank() }
         val apiM3u8 = (if (parts.size == 2) parts[0] else "").takeIf { it.isNotBlank() }
         val embedRef = embed?.let { originOf(it) } ?: "$mainUrl/"
-        val debug = mutableListOf("plugin v2", "embed=${embed ?: "null"}")
+        val debug = mutableListOf("plugin v3", "embed=${embed ?: "null"}")
 
         suspend fun emit(url: String, ref: String): Boolean {
             var ok = false
@@ -135,48 +194,14 @@ class PhimNguonCProvider : MainAPI() {
             return ok
         }
 
-        fun head(text: String?): String =
-            text?.trimStart()?.take(70)?.replace(Regex("\\s+"), " ") ?: "null"
-
         // 1) Link m3u8 trực tiếp từ API (nếu có)
         if (apiM3u8 != null && emit(apiM3u8, embedRef)) return true
 
         var sniffedUrl: String? = null
         if (embed != null) {
-            // 2) Trang embed giấu link: mở trong WebView ẩn và bắt yêu cầu .m3u8
-            val sniffed = runCatching {
-                app.get(
-                    embed,
-                    referer = "$mainUrl/",
-                    interceptor = WebViewResolver(Regex("""\.m3u8"""))
-                ).url
-            }.getOrNull()
-            debug.add("sniff=${sniffed ?: "null"}")
-            if (sniffed != null && sniffed.contains(".m3u8")) {
-                sniffedUrl = sniffed
-                val probe = runCatching { app.get(sniffed, referer = embedRef) }.getOrNull()
-                debug.add("probe code=${probe?.code} body=${head(probe?.text)}")
-                if (probe?.text?.trimStart()?.startsWith("#EXTM3U") == true &&
-                    emit(sniffed, embedRef)
-                ) return true
-            }
-
-            // 3) Tìm trực tiếp trong mã nguồn trang embed, chỉ nhận playlist hợp lệ
-            val html = runCatching {
-                app.get(embed, referer = "$mainUrl/").text.replace("\\/", "/")
-            }.getOrNull()
-            debug.add("html len=${html?.length} head=${head(html)}")
-            if (html != null) {
-                val urls = Regex("""https?:[^\s"'<>\\]+?\.m3u8[^\s"'<>\\]*""")
-                    .findAll(html).map { it.value }.distinct().toList()
-                debug.add("html m3u8 count=${urls.size} first=${urls.firstOrNull()}")
-                for (u in urls) {
-                    val valid = runCatching {
-                        app.get(u, referer = embedRef).text.trimStart().startsWith("#EXTM3U")
-                    }.getOrDefault(false)
-                    if (valid && emit(u, embedRef)) return true
-                }
-            }
+            val (valid, sniffed) = findStream(embed, embedRef, debug)
+            sniffedUrl = sniffed
+            if (valid != null && emit(valid, embedRef)) return true
 
             // 4) Dự phòng: để CloudStream tự tìm extractor phù hợp
             if (loadExtractor(embed, "$mainUrl/", subtitleCallback, callback)) return true
