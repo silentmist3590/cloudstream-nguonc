@@ -102,10 +102,10 @@ class PhimNguonCProvider : MainAPI() {
             ?.firstOrNull { !it.embed.isNullOrBlank() }?.embed
         if (firstEmbed != null) {
             dbg.add("embed=$firstEmbed")
-            runCatching { findStream(firstEmbed, originOf(firstEmbed), dbg) }
+            runCatching { findStream(firstEmbed, originOf(firstEmbed), dbg, useWebView = false) }
                 .onFailure { dbg.add("error=${it.javaClass.simpleName}: ${it.message?.take(100)}") }
         }
-        val debugText = "[DEBUG v3]\n" + dbg.joinToString("\n") + "\n\n"
+        val debugText = "[DEBUG v4]\n" + dbg.joinToString("\n") + "\n\n"
 
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
             this.posterUrl = poster
@@ -121,10 +121,11 @@ class PhimNguonCProvider : MainAPI() {
     private suspend fun findStream(
         embed: String,
         embedRef: String,
-        debug: MutableList<String>
+        debug: MutableList<String>,
+        useWebView: Boolean = true
     ): Pair<String?, String?> {
         var sniffedUrl: String? = null
-        val sniffed = runCatching {
+        val sniffed = if (!useWebView) null else runCatching {
             app.get(
                 embed,
                 referer = "$mainUrl/",
@@ -134,7 +135,7 @@ class PhimNguonCProvider : MainAPI() {
             debug.add("sniff error=${it.javaClass.simpleName}: ${it.message?.take(100)}")
             null
         }
-        debug.add("sniff=${sniffed ?: "null"}")
+        if (useWebView) debug.add("sniff=${sniffed ?: "null"}")
         if (sniffed != null && sniffed.contains(".m3u8")) {
             sniffedUrl = sniffed
             val probe = runCatching { app.get(sniffed, referer = embedRef) }.getOrNull()
@@ -142,7 +143,7 @@ class PhimNguonCProvider : MainAPI() {
             if (probe?.text?.trimStart()?.startsWith("#EXTM3U") == true) return sniffed to sniffed
         }
         val html = runCatching {
-            app.get(embed, referer = "$mainUrl/").text.replace("\\/", "/")
+            app.get(embed, referer = "$mainUrl/", timeout = 8L).text.replace("\\/", "/")
         }.getOrNull()
         debug.add("html len=${html?.length} head=${headOf(html, 200)}")
         if (html != null) {
@@ -172,7 +173,7 @@ class PhimNguonCProvider : MainAPI() {
         val embed = (if (parts.size == 2) parts[1] else data).takeIf { it.isNotBlank() }
         val apiM3u8 = (if (parts.size == 2) parts[0] else "").takeIf { it.isNotBlank() }
         val embedRef = embed?.let { originOf(it) } ?: "$mainUrl/"
-        val debug = mutableListOf("plugin v3", "embed=${embed ?: "null"}")
+        val debug = mutableListOf("plugin v4", "embed=${embed ?: "null"}")
 
         suspend fun emit(url: String, ref: String): Boolean {
             var ok = false
