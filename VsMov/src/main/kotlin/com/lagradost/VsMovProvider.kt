@@ -210,9 +210,39 @@ class VsMovProvider : MainAPI() {
         val relative = Regex("[\"'](/[^\"'\\s]+\\.m3u8[^\"'\\s]*)[\"']")
             .findAll(text).map { it.groupValues[1] }.distinct().toList()
         log.append("m3u8 tương đối=").append(relative).append('\n')
+
+        // Ghi lại đoạn mã quanh chữ master.m3u8 và chỗ khởi tạo trình phát để biết trang dùng link đó thế nào
+        var idx = text.indexOf("master.m3u8")
+        var n = 0
+        while (idx >= 0 && n < 3) {
+            val seg = text.substring(maxOf(0, idx - 300), minOf(text.length, idx + 200))
+            log.append("ctx master.m3u8@").append(idx).append(": ")
+                .append(seg.replace(Regex("\\s+"), " ")).append('\n')
+            idx = text.indexOf("master.m3u8", idx + 1)
+            n++
+        }
+        val setupIdx = text.indexOf("setup(")
+        if (setupIdx >= 0) {
+            val seg = text.substring(maxOf(0, setupIdx - 200), minOf(text.length, setupIdx + 500))
+            log.append("ctx setup: ").append(seg.replace(Regex("\\s+"), " ")).append('\n')
+        }
+
+        // Thử các địa chỉ có thể suy ra từ đường dẫn tương đối (yêu cầu thường, Referer là trang embed)
         for (r in relative) {
-            val abs = embedOrigin.trimEnd('/') + r
-            if (isHls(abs, embed)) return abs
+            val cands = listOf(
+                embedOrigin.trimEnd('/') + r,
+                embed.trimEnd('/') + r,
+                embed.substringBeforeLast('/') + r
+            ).distinct()
+            for (c in cands) {
+                val resp = runCatching { app.get(c, referer = embed) }.getOrNull()
+                val ok = resp?.text?.trimStart()?.startsWith("#EXTM3U") == true
+                log.append("thử ").append(c).append(" code=").append(resp?.code)
+                    .append(" hls=").append(ok)
+                    .append(" nd=").append(resp?.text?.trimStart()?.take(60)?.replace(Regex("\\s+"), " "))
+                    .append('\n')
+                if (ok) return c
+            }
         }
         return null
     }
