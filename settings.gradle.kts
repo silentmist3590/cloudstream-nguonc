@@ -1,4 +1,4 @@
 include("PhimNguonC")
-include(":InternetArchive")
+include("InternetArchive")
 include("VsMov")
 rootProject.name = "CloudstreamPlugins"
