@@ -1,3 +1,3 @@
 include(":PhimNguonC")
-include("InternetArchive")
+include(":InternetArchive")
 rootProject.name = "CloudstreamPlugins"
