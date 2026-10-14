@@ -12,6 +12,9 @@ import com.lagradost.cloudstream3.utils.*
 // Ngăn cách giữa m3u8 | embed | địa chỉ trang phim trong dữ liệu mỗi tập
 private const val VS_SEP = "|||"
 
+// Đặt false khi đã chạy ổn để tắt việc chép log vào clipboard
+private const val DEBUG = true
+
 // Context của ứng dụng, dùng để mở trình duyệt khi không có link phát được
 private var vsAppCtx: Context? = null
 
@@ -104,7 +107,13 @@ class VsMovProvider : MainAPI() {
         val base = res.pathImage
         val poster = fixImg(movie.posterUrl, base) ?: fixImg(movie.thumbUrl, base)
         val backdrop = fixImg(movie.thumbUrl, base)
-        val plot = stripHtml(movie.content)
+        // Ghép thêm diễn viên và đạo diễn vào phần mô tả (addActors không có trong phiên bản CloudStream này)
+        val cast = movie.actor?.filter { it.isNotBlank() }?.takeIf { it.isNotEmpty() }
+            ?.joinToString(", ")?.let { "Diễn viên: $it" }
+        val dir = movie.director?.filter { it.isNotBlank() }?.takeIf { it.isNotEmpty() }
+            ?.joinToString(", ")?.let { "Đạo diễn: $it" }
+        val plot = listOfNotNull(stripHtml(movie.content), cast, dir)
+            .joinToString("\n\n").takeIf { it.isNotBlank() }
         val tags = movie.category?.mapNotNull { it.name }
         val duration = movie.time?.let { Regex("\\d+").find(it)?.value?.toIntOrNull() }
 
@@ -112,15 +121,16 @@ class VsMovProvider : MainAPI() {
         val multiServer = servers.size > 1
         val episodes = mutableListOf<Episode>()
         servers.forEach { server ->
-            val serverName = server.serverName ?: "Server"
+            val serverName = server.serverName?.replace(Regex("\\s+"), " ")?.trim()?.takeIf { it.isNotBlank() } ?: "Server"
             (server.serverData ?: server.items)?.forEach { ep ->
                 val m3u8 = ep.linkM3u8 ?: ep.m3u8
                 val embed = ep.linkEmbed ?: ep.embed
                 if (m3u8.isNullOrBlank() && embed.isNullOrBlank()) return@forEach
                 val epName = ep.name ?: ep.filename ?: "1"
+                val label = if (epName.all { it.isDigit() }) "Tập $epName" else epName
                 episodes.add(
                     newEpisode("${m3u8.orEmpty()}$VS_SEP${embed.orEmpty()}$VS_SEP$webUrl") {
-                        this.name = if (multiServer) "$serverName - $epName" else epName
+                        this.name = if (multiServer) "$serverName - $label" else label
                         this.episode = Regex("\\d+").find(epName)?.value?.toIntOrNull()
                     }
                 )
@@ -142,7 +152,6 @@ class VsMovProvider : MainAPI() {
                 this.year = movie.year
                 this.tags = tags
                 this.duration = duration
-                addActors(movie.actor)
             }
         } else {
             newTvSeriesLoadResponse(title, webUrl, tvType, episodes) {
@@ -152,7 +161,6 @@ class VsMovProvider : MainAPI() {
                 this.year = movie.year
                 this.tags = tags
                 this.duration = duration
-                addActors(movie.actor)
             }
         }
     }
@@ -166,6 +174,58 @@ class VsMovProvider : MainAPI() {
                         Intent(Intent.ACTION_VIEW, Uri.parse(url))
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     )
+                }
+            }
+        }
+    }
+
+    private fun originOf(url: String): String {
+        val m = Regex("^(https?://[^/]+)").find(url)
+        return (m?.groupValues?.get(1) ?: mainUrl) + "/"
+    }
+
+    private suspend fun isHls(url: String, ref: String): Boolean {
+        val r = runCatching { app.get(url, referer = ref) }.getOrNull()
+        return r?.text?.trimStart()?.startsWith("#EXTM3U") == true
+    }
+
+    // Đọc trang embed bằng yêu cầu thường (Referer là vsmov.com) và tìm link .m3u8 trong mã nguồn.
+    // Chỉ thành công nếu trang để lộ link playlist; không giải mã hay can thiệp gì thêm.
+    private suspend fun findM3u8(embed: String, log: StringBuilder): String? {
+        val embedOrigin = originOf(embed)
+        val page = runCatching { app.get(embed, referer = "$mainUrl/").text }.getOrNull()
+        log.append("embed=").append(embed).append('\n')
+        log.append("html len=").append(page?.length).append('\n')
+        log.append("html head=").append(page?.replace(Regex("\\s+"), " ")?.take(1500)).append('\n')
+        val text = page?.replace("\\/", "/") ?: return null
+
+        val scripts = Regex("src=[\"']([^\"']+\\.js[^\"']*)[\"']").findAll(text).map { it.groupValues[1] }.toList()
+        log.append("scripts=").append(scripts).append('\n')
+
+        val absolute = Regex("https?://[^\"'\\s<>\\\\]+\\.m3u8[^\"'\\s<>\\\\]*")
+            .findAll(text).map { it.value }.distinct().toList()
+        log.append("m3u8 tuyệt đối=").append(absolute).append('\n')
+        for (c in absolute) if (isHls(c, embed)) return c
+
+        val relative = Regex("[\"'](/[^\"'\\s]+\\.m3u8[^\"'\\s]*)[\"']")
+            .findAll(text).map { it.groupValues[1] }.distinct().toList()
+        log.append("m3u8 tương đối=").append(relative).append('\n')
+        for (r in relative) {
+            val abs = embedOrigin.trimEnd('/') + r
+            if (isHls(abs, embed)) return abs
+        }
+        return null
+    }
+
+    // Chép log vào clipboard để dán ra chat (chỉ khi DEBUG = true)
+    private fun copyToClipboard(text: String) {
+        val c = vsAppCtx ?: return
+        runCatching {
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                runCatching {
+                    val cm = c.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("VSMov log", text))
+                    android.widget.Toast.makeText(c, "VSMov: đã chép log vào clipboard", android.widget.Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -198,16 +258,30 @@ class VsMovProvider : MainAPI() {
             }
         }
 
-        // 2) Link embed: chỉ nhờ các extractor có sẵn của CloudStream
+        // 2) Link embed: đọc trang embed, tìm link .m3u8 hiện trong mã nguồn trang (nếu có)
         if (embed.startsWith("http")) {
-            var found = false
+            val log = StringBuilder()
+            val found = findM3u8(embed, log)
+            if (found != null) {
+                var ok = false
+                runCatching {
+                    M3u8Helper.generateM3u8(name, found, originOf(embed)).forEach {
+                        callback(it)
+                        ok = true
+                    }
+                }
+                if (ok) return true
+            }
+            // Dự phòng: các extractor có sẵn của CloudStream
+            var viaExtractor = false
             runCatching {
                 loadExtractor(embed, ref, subtitleCallback) {
-                    found = true
+                    viaExtractor = true
                     callback(it)
                 }
             }
-            if (found) return true
+            if (viaExtractor) return true
+            if (DEBUG) copyToClipboard("VSMOV debug\n$log")
         }
 
         // 3) Không có link phát được: mở trang phim trên trình duyệt
