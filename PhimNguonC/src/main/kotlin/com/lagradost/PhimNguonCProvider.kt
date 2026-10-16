@@ -3,6 +3,8 @@ package com.lagradost
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.widget.Toast
 import android.util.Log
 import com.fasterxml.jackson.annotation.JsonProperty
@@ -12,9 +14,6 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.RequestBody.Companion.toRequestBody
-import java.net.URI
 
 private const val LINK_SEP = "|||"
 private const val TAG = "PhimNguonCDebug"
@@ -57,11 +56,12 @@ class PhimNguonCProvider : MainAPI() {
 
     private fun copyLogToClipboard(logText: String) {
         try {
-            val clipboard = PhimNguonCPlugin.appContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            val clip = ClipData.newPlainText("PhimNguonC Error Log", logText)
-            clipboard.setPrimaryClip(clip)
-            runCatching {
-                Toast.makeText(PhimNguonCPlugin.appContext, "Đã copy log lỗi vào clipboard!", Toast.LENGTH_LONG).show()
+            Handler(Looper.getMainLooper()).post {
+                val context = PhimNguonCPlugin.appContext
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                val clip = ClipData.newPlainText("PhimNguonC Error Log", logText)
+                clipboard.setPrimaryClip(clip)
+                Toast.makeText(context, "Đã copy log lỗi vào clipboard!", Toast.LENGTH_LONG).show()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Không thể copy vào clipboard: ${e.message}")
@@ -148,58 +148,6 @@ class PhimNguonCProvider : MainAPI() {
         }
     }
 
-    private suspend fun resolveEmbedPlaylist(embedUrl: String, refererUrl: String): String? {
-        return runCatching {
-            val uri = URI(embedUrl)
-            val origin = "${uri.scheme}://${uri.host}"
-            val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
-
-            val headers = mapOf(
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                "Referer" to refererUrl,
-                "Origin" to origin,
-                "Content-Type" to "application/json"
-            )
-
-            val embedResp = app.get(embedUrl, headers = headers)
-            var apiUrl = embedUrl
-            val apiRegex = Regex("api\\s*[:=]\\s*[\"'](https?://[^\"']+)[\"']")
-            apiRegex.find(embedResp.text)?.groupValues?.get(1)?.let {
-                apiUrl = it
-            }
-
-            val bootPayload = """{"action":"bootstrap","mode":"json","frame_origins":["$mainUrl"]}"""
-            val bootResp = app.post(
-                apiUrl,
-                headers = headers,
-                requestBody = bootPayload.toRequestBody(mediaType)
-            )
-
-            val bootJson = jsonMapper.readTree(bootResp.text)
-            val bootstrapToken = bootJson.get("bootstrap")?.asText() 
-                ?: bootJson.get("token")?.asText() 
-                ?: throw Exception("Không tìm thấy bootstrap token. Response: ${bootResp.text}")
-
-            val issuePayload = """{"action":"issue","bootstrap":"$bootstrapToken","turnstile_response":null,"playlist_format":"hls","pretty_url":true,"path_chunks":true,"frame_origins":["$mainUrl"]}"""
-            val issueResp = app.post(
-                apiUrl,
-                headers = headers,
-                requestBody = issuePayload.toRequestBody(mediaType)
-            )
-
-            val issueJson = jsonMapper.readTree(issueResp.text)
-            val playlist = issueJson.get("playlist")?.asText() 
-                ?: issueJson.get("url")?.asText()
-                ?: throw Exception("Không tìm thấy playlist trong issue response: ${issueResp.text}")
-
-            playlist
-        }.onFailure { e ->
-            val errorMsg = "LỖI BẮT TAY EMBED: ${e.localizedMessage} | URL: $embedUrl"
-            Log.e(TAG, errorMsg, e)
-            copyLogToClipboard(errorMsg)
-        }.getOrNull()
-    }
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -214,7 +162,8 @@ class PhimNguonCProvider : MainAPI() {
 
         var success = false
 
-        if (m3u8.isNotBlank() && m3u8.startsWith("http") && !m3u8.contains("embed")) {
+        // 1. Thử xử lý link m3u8 trực tiếp nếu có
+        if (m3u8.isNotBlank() && m3u8.startsWith("http")) {
             success = runCatching {
                 M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
                     callback(link)
@@ -240,42 +189,70 @@ class PhimNguonCProvider : MainAPI() {
 
         if (success) return true
 
+        // 2. Thử dùng loadExtractor tiêu chuẩn cho link embed
         if (embed.isNotBlank() && embed.startsWith("http")) {
-            val playlistUrl = resolveEmbedPlaylist(embed, ref)
-            if (!playlistUrl.isNullOrBlank()) {
-                val uri = URI(embed)
-                val origin = "${uri.scheme}://${uri.host}"
-
-                callback(
-                    newExtractorLink(
-                        source = this.name,
-                        name = "${this.name} (HLS)",
-                        url = playlistUrl,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = embed
-                        this.quality = Qualities.P1080.value
-                        this.headers = mapOf(
-                            "Referer" to embed,
-                            "Origin" to origin,
-                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                        )
-                    }
-                )
-                return true
-            }
-
             success = runCatching {
                 loadExtractor(embed, ref, subtitleCallback, callback)
-            }.onFailure { e ->
-                val errorMsg = "LỖI LOAD EXTRACTOR: ${e.localizedMessage} | Embed: $embed"
-                Log.e(TAG, errorMsg, e)
-                copyLogToClipboard(errorMsg)
             }.getOrDefault(false)
+
+            if (success) return true
+
+            // 3. Fallback: Tải mã nguồn trang embed và quét tìm link m3u8 / mp4 / source bên trong
+            val embedHtml = runCatching {
+                app.get(
+                    embed,
+                    headers = mapOf(
+                        "Referer" to ref,
+                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                    )
+                ).text
+            }.getOrNull()
+
+            if (!embedHtml.isNullOrBlank()) {
+                val urlRegex = Regex("\"(https?://[^\"]+?\\.(?:m3u8|mp4)[^\"]*)\"|'(https?://[^']+?\\.(?:m3u8|mp4)[^']*)'")
+                urlRegex.findAll(embedHtml).forEach { match ->
+                    val link = match.groupValues[1].ifEmpty { match.groupValues[2] }
+                    if (link.isNotBlank()) {
+                        callback(
+                            newExtractorLink(
+                                source = this.name,
+                                name = "${this.name} (HLS)",
+                                url = link,
+                                type = ExtractorLinkType.M3U8
+                            ) {
+                                this.referer = embed
+                                this.quality = Qualities.P1080.value
+                            }
+                        )
+                        success = true
+                    }
+                }
+
+                val fileRegex = Regex("(?:file|url|source|src)\\s*[:=]\\s*[\"'](https?://[^\"']+)[\"']")
+                fileRegex.findAll(embedHtml).forEach { match ->
+                    val link = match.groupValues[1]
+                    if (link.isNotBlank() && (link.contains("m3u8") || link.contains("mp4"))) {
+                        callback(
+                            newExtractorLink(
+                                source = this.name,
+                                name = "${this.name} (Stream)",
+                                url = link,
+                                type = ExtractorLinkType.M3U8
+                            ) {
+                                this.referer = embed
+                                this.quality = Qualities.P1080.value
+                            }
+                        )
+                        success = true
+                    }
+                }
+            }
         }
 
         if (!success) {
-            copyLogToClipboard("KHÔNG TÌM THẤY LIÊN KẾT | Data payload: $data")
+            val errorMsg = "KHÔNG TÌM THẤY LIÊN KẾT | Payload: $data | Embed: $embed | M3u8: $m3u8"
+            Log.e(TAG, errorMsg)
+            copyLogToClipboard(errorMsg)
         }
 
         return success
