@@ -126,9 +126,6 @@ class PhimNguonCProvider : MainAPI() {
         }
     }
 
-    /**
-     * Xử lý chuyên sâu cho các trang embed dạng streamc.xyz bằng giao thức API Bootstrap -> Issue
-     */
     private suspend fun resolveStreamCEmbed(embedUrl: String, refererUrl: String): String? {
         return runCatching {
             val uri = URI(embedUrl)
@@ -142,7 +139,6 @@ class PhimNguonCProvider : MainAPI() {
                 "Accept" to "application/json, text/javascript, */*; q=0.01"
             )
 
-            // Bước 1: Lấy nội dung trang embed để dò tìm endpoint API thực tế (nếu có thay đổi)
             val embedResp = app.get(embedUrl, headers = headers)
             var apiUrl = embedUrl
             val apiRegex = Regex("api\\s*[:=]\\s*[\"'](https?://[^\"']+)[\"']")
@@ -150,7 +146,6 @@ class PhimNguonCProvider : MainAPI() {
                 apiUrl = it
             }
 
-            // Bước 2: Gửi yêu cầu Bootstrap lấy token bảo mật
             val bootPayload = """{"action":"bootstrap","mode":"json","frame_origins":["$mainUrl"]}"""
             val bootResp = app.post(
                 apiUrl,
@@ -162,7 +157,6 @@ class PhimNguonCProvider : MainAPI() {
                 ?: bootJson.get("token")?.asText() 
                 ?: return@runCatching null
 
-            // Bước 3: Gửi yêu cầu Issue lấy link playlist HLS thực sự (.m3u8)
             val issuePayload = """{"action":"issue","bootstrap":"$bootstrapToken","turnstile_response":null,"playlist_format":"hls","pretty_url":true,"path_chunks":true,"frame_origins":["$mainUrl"]}"""
             val issueResp = app.post(
                 apiUrl,
@@ -195,7 +189,6 @@ class PhimNguonCProvider : MainAPI() {
 
         var found = false
 
-        // 1. Xử lý link m3u8 trực tiếp nếu hợp lệ và không chứa từ khóa embed
         if (m3u8.isNotBlank() && m3u8.startsWith("http") && !m3u8.contains("embed")) {
             runCatching {
                 if (m3u8.contains(".m3u8")) {
@@ -209,7 +202,6 @@ class PhimNguonCProvider : MainAPI() {
 
         if (found) return true
 
-        // 2. Xử lý link embed (streamc.xyz) bằng phương pháp bắt tay API chuyên dụng
         if (embed.isNotBlank() && embed.startsWith("http")) {
             val resolvedM3u8 = resolveStreamCEmbed(embed, ref)
             if (!resolvedM3u8.isNullOrBlank() && resolvedM3u8.contains(".m3u8")) {
@@ -234,7 +226,6 @@ class PhimNguonCProvider : MainAPI() {
                 return true
             }
 
-            // 3. Fallback qua hệ thống loadExtractor chuẩn của Cloudstream
             found = runCatching {
                 loadExtractor(embed, ref, subtitleCallback, callback)
             }.getOrDefault(false)
@@ -282,6 +273,7 @@ class PhimNguonCProvider : MainAPI() {
         val name: String?,
         @JsonProperty("original_name") val originalName: String?,
         val slug: String?,
+        val year: Int?,
         val description: String?,
         @JsonProperty("poster_url") val posterUrl: String?,
         @JsonProperty("thumb_url") val thumbUrl: String?,
