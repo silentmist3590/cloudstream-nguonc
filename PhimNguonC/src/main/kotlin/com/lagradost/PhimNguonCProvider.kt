@@ -8,6 +8,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
+import java.net.URI
 
 private const val LINK_SEP = "|||"
 private const val TAG = "PhimNguonC"
@@ -138,41 +139,50 @@ class PhimNguonCProvider : MainAPI() {
         var found = false
 
         // 1. Xử lý link m3u8 trực tiếp nếu có
-        if (m3u8.isNotBlank() && m3u8.startsWith("http")) {
+        if (m3u8.isNotBlank() && m3u8.startsWith("http") && !m3u8.contains("embed")) {
             runCatching {
-                if (m3u8.contains(".m3u8")) {
-                    M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
-                        callback(link)
-                        found = true
-                    }
+                M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
+                    callback(link)
+                    found = true
                 }
             }
             if (!found) {
-                val extracted = runCatching {
-                    loadExtractor(m3u8, ref, subtitleCallback, callback)
-                }.getOrDefault(false)
-                if (extracted) found = true
+                callback(
+                    newExtractorLink(
+                        source = this.name,
+                        name = "${this.name} (M3U8)",
+                        url = m3u8,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = ref
+                        this.quality = Qualities.P1080.value
+                    }
+                )
+                found = true
             }
         }
 
         if (found) return true
 
-        // 2. Xử lý link embed bằng cách trích xuất luồng m3u8 thật từ mã nguồn trang
+        // 2. Xử lý chuyên sâu cho trang embed (streamc.xyz) với đầy đủ Header giả lập
         if (embed.isNotBlank() && embed.startsWith("http")) {
-            val extracted = runCatching {
+            val embedHeaders = mapOf(
+                "Referer" to ref,
+                "Origin" to mainUrl,
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+            )
+
+            // Thử dùng loadExtractor chuẩn trước kèm theo headers
+            found = runCatching {
                 loadExtractor(embed, ref, subtitleCallback, callback)
             }.getOrDefault(false)
 
-            if (extracted) return true
+            if (found) return true
 
+            // Tải mã nguồn trang embed vượt qua lớp chặn nhờ bộ header giả lập trang gốc
             val embedHtml = runCatching {
-                app.get(
-                    embed,
-                    headers = mapOf(
-                        "Referer" to ref,
-                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                    )
-                ).text
+                app.get(embed, headers = embedHeaders).text
             }.getOrNull()
 
             if (!embedHtml.isNullOrBlank()) {
@@ -183,12 +193,39 @@ class PhimNguonCProvider : MainAPI() {
                         callback(
                             newExtractorLink(
                                 source = this.name,
-                                name = "${this.name} (HLS)",
+                                name = "${this.name} (StreamC HLS)",
                                 url = hlsUrl,
                                 type = ExtractorLinkType.M3U8
                             ) {
                                 this.referer = embed
                                 this.quality = Qualities.P1080.value
+                                this.headers = mapOf(
+                                    "Referer" to embed,
+                                    "Origin" to mainUrl
+                                )
+                            }
+                        )
+                        found = true
+                    }
+                }
+
+                val fileRegex = Regex("(?:file|src|url|source)\\s*[:=]\\s*[\"'](https?://[^\"']+)[\"']")
+                fileRegex.findAll(embedHtml).forEach { match ->
+                    val streamUrl = match.groupValues[1]
+                    if (streamUrl.isNotBlank() && (streamUrl.contains("m3u8") || streamUrl.contains("mp4"))) {
+                        callback(
+                            newExtractorLink(
+                                source = this.name,
+                                name = "${this.name} (StreamC Direct)",
+                                url = streamUrl,
+                                type = if (streamUrl.contains("m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.Video
+                            ) {
+                                this.referer = embed
+                                this.quality = Qualities.P1080.value
+                                this.headers = mapOf(
+                                    "Referer" to embed,
+                                    "Origin" to mainUrl
+                                )
                             }
                         )
                         found = true
