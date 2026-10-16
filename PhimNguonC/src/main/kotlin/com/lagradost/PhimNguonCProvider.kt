@@ -198,19 +198,20 @@ class PhimNguonCProvider : MainAPI() {
                 runCatching {
                     M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
                         callback(
-                            ExtractorLink(
+                            newExtractorLink(
                                 source = this.name,
                                 name = link.name,
                                 url = link.url,
-                                referer = ref,
-                                quality = link.quality,
-                                isM3u8 = link.isM3u8,
-                                headers = mapOf(
+                                type = ExtractorLinkType.M3U8
+                            ) {
+                                this.referer = ref
+                                this.quality = link.quality
+                                this.headers = mapOf(
                                     "Referer" to ref,
                                     "Origin" to mainUrl,
                                     "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
                                 )
-                            )
+                            }
                         )
                         ok = true
                     }
