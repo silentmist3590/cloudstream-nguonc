@@ -1,4 +1,4 @@
-version = 13
+version = 14
 
 cloudstream {
     description = "Xem phim từ nguồn phim.nguonc.com trên CloudStream"
@@ -12,4 +12,5 @@ cloudstream {
 
 dependencies {
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 }
