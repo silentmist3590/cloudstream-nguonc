@@ -10,6 +10,8 @@ import com.lagradost.cloudstream3.utils.*
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URI
+import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 
 private const val LINK_SEP = "|||"
 
@@ -208,15 +210,15 @@ class PhimNguonCProvider : MainAPI() {
             val playlistUrl = resolveStreamCPlaylist(embed)
             if (!playlistUrl.isNullOrBlank()) {
                 callback(
-                    ExtractorLink(
-                        source = this.name,
-                        name = "${this.name} (HLS)",
-                        url = playlistUrl,
-                        referer = embed,
-                        quality = Qualities.P1080.value,
-                        isM3u8 = true
-                    )
-                )
+                    newExtractorLink(
+    source = this.name,
+    name = "${this.name} (HLS)",
+    url = playlistUrl,
+    type = ExtractorLinkType.M3U8
+) {
+    this.referer = embed
+    this.quality = Qualities.P1080.value
+}
                 return true
             }
 
