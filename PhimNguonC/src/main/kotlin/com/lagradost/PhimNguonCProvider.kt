@@ -3,14 +3,10 @@ package com.lagradost
 import android.util.Log
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
-import com.fasterxml.jackson.module.kotlin.readValue
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.RequestBody.Companion.toRequestBody
-import java.net.URI
 
 private const val LINK_SEP = "|||"
 private const val TAG = "PhimNguonC"
@@ -126,55 +122,6 @@ class PhimNguonCProvider : MainAPI() {
         }
     }
 
-    private suspend fun resolveStreamCEmbed(embedUrl: String, refererUrl: String): String? {
-        return runCatching {
-            val uri = URI(embedUrl)
-            val origin = "${uri.scheme}://${uri.host}"
-            val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
-
-            val headers = mapOf(
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                "Referer" to refererUrl,
-                "Origin" to origin,
-                "Accept" to "application/json, text/javascript, */*; q=0.01"
-            )
-
-            val embedResp = app.get(embedUrl, headers = headers)
-            var apiUrl = embedUrl
-            val apiRegex = Regex("api\\s*[:=]\\s*[\"'](https?://[^\"']+)[\"']")
-            apiRegex.find(embedResp.text)?.groupValues?.get(1)?.let {
-                apiUrl = it
-            }
-
-            val bootPayload = """{"action":"bootstrap","mode":"json","frame_origins":["$mainUrl"]}"""
-            val bootResp = app.post(
-                apiUrl,
-                headers = headers,
-                requestBody = bootPayload.toRequestBody(mediaType)
-            )
-            val bootJson = jsonMapper.readTree(bootResp.text)
-            val bootstrapToken = bootJson.get("bootstrap")?.asText() 
-                ?: bootJson.get("token")?.asText() 
-                ?: return@runCatching null
-
-            val issuePayload = """{"action":"issue","bootstrap":"$bootstrapToken","turnstile_response":null,"playlist_format":"hls","pretty_url":true,"path_chunks":true,"frame_origins":["$mainUrl"]}"""
-            val issueResp = app.post(
-                apiUrl,
-                headers = headers,
-                requestBody = issuePayload.toRequestBody(mediaType)
-            )
-            val issueJson = jsonMapper.readTree(issueResp.text)
-            val playlistUrl = issueJson.get("playlist")?.asText() 
-                ?: issueJson.get("url")?.asText()
-
-            if (!playlistUrl.isNullOrBlank() && playlistUrl.contains(".m3u8")) {
-                playlistUrl
-            } else {
-                null
-            }
-        }.getOrNull()
-    }
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -189,6 +136,7 @@ class PhimNguonCProvider : MainAPI() {
 
         var found = false
 
+        // 1. Xử lý link m3u8 trực tiếp nếu có sẵn
         if (m3u8.isNotBlank() && m3u8.startsWith("http") && !m3u8.contains("embed")) {
             runCatching {
                 if (m3u8.contains(".m3u8")) {
@@ -202,30 +150,8 @@ class PhimNguonCProvider : MainAPI() {
 
         if (found) return true
 
+        // 2. Sử dụng bộ trích xuất chuẩn của Cloudstream cho trang embed
         if (embed.isNotBlank() && embed.startsWith("http")) {
-            val resolvedM3u8 = resolveStreamCEmbed(embed, ref)
-            if (!resolvedM3u8.isNullOrBlank() && resolvedM3u8.contains(".m3u8")) {
-                val uri = runCatching { URI(embed) }.getOrNull()
-                val origin = if (uri != null) "${uri.scheme}://${uri.host}" else mainUrl
-
-                callback(
-                    newExtractorLink(
-                        source = this.name,
-                        name = "${this.name} (HLS)",
-                        url = resolvedM3u8,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = embed
-                        this.quality = Qualities.P1080.value
-                        this.headers = mapOf(
-                            "Referer" to embed,
-                            "Origin" to origin
-                        )
-                    }
-                )
-                return true
-            }
-
             found = runCatching {
                 loadExtractor(embed, ref, subtitleCallback, callback)
             }.getOrDefault(false)
