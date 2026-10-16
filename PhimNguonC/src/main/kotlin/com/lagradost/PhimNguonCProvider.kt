@@ -9,10 +9,10 @@ import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
 
-// Ngăn cách giữa link m3u8 (nếu có) và địa chỉ trang phim trong dữ liệu của mỗi tập
+// Dấu phân cách lưu thông tin tập: m3u8|||embed|||webUrl
 private const val LINK_SEP = "|||"
 
-// Context của ứng dụng, dùng để mở trình duyệt
+// Context ứng dụng dùng cho WebView và mở trình duyệt
 private var appCtx: Context? = null
 
 @CloudstreamPlugin
@@ -47,10 +47,8 @@ class PhimNguonCProvider : MainAPI() {
         "danh-sach/phim-le" to "Phim Lẻ"
     )
 
-    // Địa chỉ trang web của phim (dùng cho nút mở trình duyệt trong CloudStream)
     private fun pageUrl(slug: String) = "$mainUrl/phim/$slug"
 
-    // Lấy slug từ địa chỉ trang web hoặc địa chỉ API cũ (đã lưu trong lịch sử/yêu thích)
     private fun slugOf(url: String) =
         url.trimEnd('/').substringAfterLast('/').substringBefore('?')
 
@@ -100,10 +98,14 @@ class PhimNguonCProvider : MainAPI() {
             server.items?.forEach { ep ->
                 val epName = ep.name ?: "1"
                 val epNum = epName.toIntOrNull()
-                // Chỉ giữ lại link m3u8 từ API; nếu trống thì tập vẫn hiện nhưng chưa phát được
-                if (!ep.m3u8.isNullOrBlank() || !ep.embed.isNullOrBlank()) {
+                val m3u8 = ep.m3u8.orEmpty()
+                val embed = ep.embed.orEmpty()
+
+                if (m3u8.isNotBlank() || embed.isNotBlank()) {
+                    // Lưu data theo cấu trúc: m3u8|||embed|||webUrl
+                    val dataPayload = "$m3u8$LINK_SEP$embed$LINK_SEP$webUrl"
                     episodes.add(
-                        newEpisode("${ep.m3u8.orEmpty()}$LINK_SEP$webUrl") {
+                        newEpisode(dataPayload) {
                             this.name = "$serverName - Tập $epName"
                             this.episode = epNum
                         }
@@ -140,37 +142,119 @@ class PhimNguonCProvider : MainAPI() {
         }
     }
 
-    // Chọn tập: nếu API có playlist HLS thật thì phát ngay trong CloudStream,
-    // ngược lại mở trang phim trên trình duyệt để xem bằng trình phát của chính trang.
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val parts = data.split(LINK_SEP, limit = 2)
+        val parts = data.split(LINK_SEP)
         val m3u8 = parts.getOrNull(0).orEmpty()
-        val pageUrl = parts.getOrNull(1).orEmpty().ifBlank { mainUrl }
+        val embed = parts.getOrNull(1).orEmpty()
+        val pageUrl = parts.getOrNull(2).orEmpty().ifBlank { mainUrl }
         val ref = "$mainUrl/"
 
+        var streamFound = false
+
+        // BƯỚC 1: Nếu có link m3u8 trực tiếp, thử tải với header chuẩn
         if (m3u8.startsWith("http")) {
-            val body = runCatching { app.get(m3u8, referer = ref).text }.getOrNull()
-            if (body?.trimStart()?.startsWith("#EXTM3U") == true) {
-                var ok = false
+            val response = runCatching {
+                app.get(
+                    m3u8,
+                    headers = mapOf(
+                        "Referer" to ref,
+                        "Origin" to mainUrl,
+                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                    )
+                )
+            }.getOrNull()
+
+            val body = response?.text?.trimStart()
+            if (body?.startsWith("#EXTM3U") == true) {
                 runCatching {
                     M3u8Helper.generateM3u8(name, m3u8, ref).forEach {
                         callback(it)
-                        ok = true
+                        streamFound = true
                     }
                 }
-                if (ok) return true
+                if (streamFound) return true
             }
         }
 
+        // BƯỚC 2: Thử Extractor mặc định của Cloudstream nếu embed là các host phổ biến
+        if (embed.startsWith("http")) {
+            val extracted = runCatching {
+                loadExtractor(embed, ref, subtitleCallback, callback)
+            }.getOrDefault(false)
+
+            if (extracted) return true
+        }
+
+        // BƯỚC 3: Dùng WebView ngầm bọc iframe + JS Hook WebCrypto
+        val context = appCtx
+        if (!streamFound && embed.startsWith("http") && context != null) {
+            val extractedData = NguonCHelper.extractM3u8FromEmbed(context, embed, pageUrl)
+
+            if (!extractedData.isNullOrBlank()) {
+                // Trường hợp 1: WebView bắt được trực tiếp URL .m3u8
+                if (extractedData.startsWith("http")) {
+                    runCatching {
+                        M3u8Helper.generateM3u8(name, extractedData, ref).forEach {
+                            callback(it)
+                            streamFound = true
+                        }
+                    }
+                    if (streamFound) return true
+                }
+
+                // Trường hợp 2: Dữ liệu là nội dung text của file M3U8 sau khi decrypt
+                if (extractedData.contains("#EXTM3U")) {
+                    // Tìm xem bên trong có URL sub-stream .m3u8 khác không
+                    val subStreamRegex = Regex("""https?://[^\s"]+\.m3u8[^\s"]*""")
+                    val matchUrl = subStreamRegex.find(extractedData)?.value
+
+                    if (matchUrl != null) {
+                        callback(
+                            ExtractorLink(
+                                source = this.name,
+                                name = "${this.name} HLS",
+                                url = matchUrl,
+                                referer = ref,
+                                quality = Qualities.P1080.value,
+                                isM3u8 = true
+                            )
+                        )
+                        return true
+                    }
+
+                    // Nếu là Playlist chứa trực tiếp các chunk, chuyển sang Data URI
+                    val base64M3u8 = android.util.Base64.encodeToString(
+                        extractedData.toByteArray(Charsets.UTF_8),
+                        android.util.Base64.NO_WRAP
+                    )
+                    val dataUrl = "data:application/vnd.apple.mpegurl;base64,$base64M3u8"
+
+                    callback(
+                        ExtractorLink(
+                            source = this.name,
+                            name = "${this.name} Decrypted Stream",
+                            url = dataUrl,
+                            referer = ref,
+                            quality = Qualities.P1080.value,
+                            isM3u8 = true
+                        )
+                    )
+                    return true
+                }
+            }
+        }
+
+        // BƯỚC 4: Fallback cuối cùng nếu không giải mã được
         openInBrowser(pageUrl)
         return false
     }
 
+    // Các data model phản hồi từ API NguonC
     data class NguonCPaginate(
         @JsonProperty("current_page") val currentPage: Int?,
         @JsonProperty("total_page") val totalPage: Int?,
