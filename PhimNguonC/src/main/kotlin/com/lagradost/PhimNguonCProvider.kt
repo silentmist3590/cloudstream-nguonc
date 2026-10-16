@@ -1,19 +1,24 @@
 package com.lagradost
 
-import android.util.Log
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import com.fasterxml.jackson.annotation.JsonProperty
-import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
 
+// Ngăn cách giữa link m3u8 (nếu có) và địa chỉ trang phim trong dữ liệu của mỗi tập
 private const val LINK_SEP = "|||"
-private const val TAG = "PhimNguonC"
+
+// Context của ứng dụng, dùng để mở trình duyệt
+private var appCtx: Context? = null
 
 @CloudstreamPlugin
 class PhimNguonCPlugin : Plugin() {
-    override fun load(context: android.content.Context) {
+    override fun load(context: Context) {
+        appCtx = context.applicationContext ?: context
         registerMainAPI(PhimNguonCProvider())
     }
 }
@@ -27,7 +32,8 @@ class PhimNguonCProvider : MainAPI() {
     override val supportedTypes = setOf(
         TvType.Movie,
         TvType.TvSeries,
-        TvType.AsianDrama
+        TvType.AsianDrama,
+        TvType.NSFW
     )
 
     override val mainPage = mainPageOf(
@@ -36,14 +42,15 @@ class PhimNguonCProvider : MainAPI() {
         "the-loai/phim-hai" to "Phim Hài",
         "the-loai/chien-tranh" to "Phim Chiến Tranh",
         "the-loai/lich-su" to "Phim Lịch Sử",
+        "the-loai/phim-18" to "Phim 18+",
         "danh-sach/phim-bo" to "Phim Bộ",
         "danh-sach/phim-le" to "Phim Lẻ"
     )
 
-    private val jsonMapper = jacksonObjectMapper()
-
+    // Địa chỉ trang web của phim (dùng cho nút mở trình duyệt trong CloudStream)
     private fun pageUrl(slug: String) = "$mainUrl/phim/$slug"
 
+    // Lấy slug từ địa chỉ trang web hoặc địa chỉ API cũ (đã lưu trong lịch sử/yêu thích)
     private fun slugOf(url: String) =
         url.trimEnd('/').substringAfterLast('/').substringBefore('?')
 
@@ -54,6 +61,7 @@ class PhimNguonCProvider : MainAPI() {
         val url = "$mainUrl/api/films/${request.data}?page=$page"
         val res = app.get(url).parsedSafe<NguonCListResponse>()
         val homeItems = res?.items?.mapNotNull { it.toSearchResponse() } ?: emptyList()
+
         val hasNext = (res?.paginate?.currentPage ?: 0) < (res?.paginate?.totalPage ?: 0)
         return newHomePageResponse(request.name, homeItems, hasNext = hasNext)
     }
@@ -92,13 +100,10 @@ class PhimNguonCProvider : MainAPI() {
             server.items?.forEach { ep ->
                 val epName = ep.name ?: "1"
                 val epNum = epName.toIntOrNull()
-                val m3u8 = ep.m3u8.orEmpty()
-                val embed = ep.embed.orEmpty()
-
-                if (m3u8.isNotBlank() || embed.isNotBlank()) {
-                    val dataPayload = "$m3u8$LINK_SEP$embed$LINK_SEP$webUrl"
+                // Chỉ giữ lại link m3u8 từ API; nếu trống thì tập vẫn hiện nhưng chưa phát được
+                if (!ep.m3u8.isNullOrBlank() || !ep.embed.isNullOrBlank()) {
                     episodes.add(
-                        newEpisode(dataPayload) {
+                        newEpisode("${ep.m3u8.orEmpty()}$LINK_SEP$webUrl") {
                             this.name = "$serverName - Tập $epName"
                             this.episode = epNum
                         }
@@ -122,42 +127,48 @@ class PhimNguonCProvider : MainAPI() {
         }
     }
 
+    private fun openInBrowser(url: String) {
+        val c = appCtx ?: return
+        runCatching {
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                runCatching {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    c.startActivity(intent)
+                }
+            }
+        }
+    }
+
+    // Chọn tập: nếu API có playlist HLS thật thì phát ngay trong CloudStream,
+    // ngược lại mở trang phim trên trình duyệt để xem bằng trình phát của chính trang.
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val parts = data.split(LINK_SEP)
+        val parts = data.split(LINK_SEP, limit = 2)
         val m3u8 = parts.getOrNull(0).orEmpty()
-        val embed = parts.getOrNull(1).orEmpty()
-        val webUrl = parts.getOrNull(2).orEmpty()
-        val ref = if (webUrl.isNotBlank()) webUrl else "$mainUrl/"
+        val pageUrl = parts.getOrNull(1).orEmpty().ifBlank { mainUrl }
+        val ref = "$mainUrl/"
 
-        var found = false
-
-        // 1. Xử lý link m3u8 trực tiếp nếu có sẵn
-        if (m3u8.isNotBlank() && m3u8.startsWith("http") && !m3u8.contains("embed")) {
-            runCatching {
-                if (m3u8.contains(".m3u8")) {
-                    M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
-                        callback(link)
-                        found = true
+        if (m3u8.startsWith("http")) {
+            val body = runCatching { app.get(m3u8, referer = ref).text }.getOrNull()
+            if (body?.trimStart()?.startsWith("#EXTM3U") == true) {
+                var ok = false
+                runCatching {
+                    M3u8Helper.generateM3u8(name, m3u8, ref).forEach {
+                        callback(it)
+                        ok = true
                     }
                 }
+                if (ok) return true
             }
         }
 
-        if (found) return true
-
-        // 2. Sử dụng bộ trích xuất chuẩn của Cloudstream cho trang embed
-        if (embed.isNotBlank() && embed.startsWith("http")) {
-            found = runCatching {
-                loadExtractor(embed, ref, subtitleCallback, callback)
-            }.getOrDefault(false)
-        }
-
-        return found
+        openInBrowser(pageUrl)
+        return false
     }
 
     data class NguonCPaginate(
