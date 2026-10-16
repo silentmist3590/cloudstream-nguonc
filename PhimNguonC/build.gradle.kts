@@ -1,10 +1,11 @@
-version = 14
+version = 15
 
 cloudstream {
     description = "Xem phim từ nguồn phim.nguonc.com trên CloudStream"
     authors = listOf("silentmist3590")
     status = 1
-    tvTypes = listOf("Movie", "TvSeries", "AsianDrama", "NSFW")
+    // Bỏ tag NSFW ở build.gradle để tránh bị Cloudstream ẩn mặc định
+    tvTypes = listOf("Movie", "TvSeries", "AsianDrama")
     requiresResources = false
     language = "vi"
     iconUrl = "https://phim.nguonc.com/favicon.ico"
