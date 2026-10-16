@@ -8,6 +8,9 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.net.URI
 
 private const val LINK_SEP = "|||"
 private const val TAG = "PhimNguonC"
@@ -123,6 +126,66 @@ class PhimNguonCProvider : MainAPI() {
         }
     }
 
+    /**
+     * Tự động thực hiện quy trình bắt tay 2 bước (Bootstrap -> Issue) với API embed để lấy link .m3u8 thực tế
+     */
+    private suspend fun resolveEmbedPlaylist(embedUrl: String, refererUrl: String): String? {
+        return runCatching {
+            val uri = URI(embedUrl)
+            val origin = "${uri.scheme}://${uri.host}"
+            val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
+
+            val headers = mapOf(
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Referer" to refererUrl,
+                "Origin" to origin,
+                "Content-Type" to "application/json"
+            )
+
+            // Bước 1: Lấy nội dung trang embed để kiểm tra endpoint API thực tế nếu có
+            val embedHtml = app.get(embedUrl, headers = headers).text
+            var apiUrl = embedUrl
+            val apiRegex = Regex("api\\s*[:=]\\s*[\"'](https?://[^\"']+)[\"']")
+            apiRegex.find(embedHtml)?.groupValues?.get(1)?.let {
+                apiUrl = it
+            }
+
+            Log.d(TAG, "API Endpoint được xác định: $apiUrl")
+
+            // Bước 2: Gửi yêu cầu Bootstrap để nhận token phiên làm việc
+            val bootPayload = """{"action":"bootstrap","mode":"json","frame_origins":["$mainUrl"]}"""
+            val bootResp = app.post(
+                apiUrl,
+                headers = headers,
+                requestBody = bootPayload.toRequestBody(mediaType)
+            ).text
+
+            val bootJson = jsonMapper.readTree(bootResp)
+            val bootstrapToken = bootJson.get("bootstrap")?.asText() 
+                ?: bootJson.get("token")?.asText() 
+                ?: return null
+
+            Log.d(TAG, "Đã nhận bootstrap token thành công")
+
+            // Bước 3: Gửi yêu cầu Issue với định dạng HLS để lấy URL playlist
+            val issuePayload = """{"action":"issue","bootstrap":"$bootstrapToken","turnstile_response":null,"playlist_format":"hls","pretty_url":true,"path_chunks":true,"frame_origins":["$mainUrl"]}"""
+            val issueResp = app.post(
+                apiUrl,
+                headers = headers,
+                requestBody = issuePayload.toRequestBody(mediaType)
+            ).text
+
+            val issueJson = jsonMapper.readTree(issueResp)
+            val playlist = issueJson.get("playlist")?.asText() 
+                ?: issueJson.get("url")?.asText()
+
+            Log.d(TAG, "Đã lấy được link playlist HLS: $playlist")
+            playlist
+        }.onFailure { e ->
+            Log.e(TAG, "Lỗi khi phân giải embed playlist: ${e.message}", e)
+        }.getOrNull()
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -137,82 +200,63 @@ class PhimNguonCProvider : MainAPI() {
 
         var success = false
 
-        // 1. Xử lý trường m3u8 nếu có sẵn
-        if (m3u8.isNotBlank()) {
-            if (m3u8.contains(".m3u8") && !m3u8.contains("embed") && !m3u8.contains("player")) {
-                success = runCatching {
-                    M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
-                        callback(link)
-                    }
-                    true
-                }.getOrDefault(false)
-            }
+        // 1. Kiểm tra link m3u8 trực tiếp nếu có sẵn
+        if (m3u8.isNotBlank() && m3u8.startsWith("http") && !m3u8.contains("embed")) {
+            success = runCatching {
+                M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
+                    callback(link)
+                }
+                true
+            }.getOrDefault(false)
+
             if (!success) {
-                success = runCatching {
-                    loadExtractor(m3u8, ref, subtitleCallback, callback)
-                }.getOrDefault(false)
+                callback(
+                    newExtractorLink(
+                        source = this.name,
+                        name = "${this.name} (M3U8)",
+                        url = m3u8,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = ref
+                        this.quality = Qualities.P1080.value
+                    }
+                )
+                success = true
             }
         }
 
         if (success) return true
 
-        // 2. Xử lý trường embed và quét mã nguồn trang phát
-        if (embed.isNotBlank()) {
+        // 2. Xử lý link embed thông qua cơ chế giải mã API Bootstrap -> Issue
+        if (embed.isNotBlank() && embed.startsWith("http")) {
+            val playlistUrl = resolveEmbedPlaylist(embed, ref)
+            if (!playlistUrl.isNullOrBlank()) {
+                val uri = URI(embed)
+                val origin = "${uri.scheme}://${uri.host}"
+
+                callback(
+                    newExtractorLink(
+                        source = this.name,
+                        name = "${this.name} (HLS)",
+                        url = playlistUrl,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = embed
+                        this.quality = Qualities.P1080.value
+                        this.headers = mapOf(
+                            "Referer" to embed,
+                            "Origin" to origin,
+                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                        )
+                    }
+                )
+                return true
+            }
+
+            // Fallback cuối cùng: Thử loadExtractor tiêu chuẩn
             success = runCatching {
                 loadExtractor(embed, ref, subtitleCallback, callback)
             }.getOrDefault(false)
-
-            if (success) return true
-
-            val embedHtml = runCatching {
-                app.get(
-                    embed,
-                    headers = mapOf(
-                        "Referer" to ref,
-                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                    )
-                ).text
-            }.getOrNull()
-
-            if (!embedHtml.isNullOrBlank()) {
-                val urlRegex = Regex("\"(https?://[^\"]+?\\.(?:m3u8|mp4)[^\"]*)\"|'(https?://[^']+?\\.(?:m3u8|mp4)[^']*)'")
-                urlRegex.findAll(embedHtml).forEach { match ->
-                    val link = match.groupValues[1].ifEmpty { match.groupValues[2] }
-                    if (link.isNotBlank()) {
-                        callback(
-                            newExtractorLink(
-                                source = this.name,
-                                name = "${this.name} (HLS)",
-                                url = link,
-                                type = ExtractorLinkType.M3U8
-                            ) {
-                                this.referer = embed
-                                this.quality = Qualities.P1080.value
-                            }
-                        )
-                        success = true
-                    }
-                }
-
-                val fileRegex = Regex("(?:file|url|source|src)\\s*[:=]\\s*[\"'](https?://[^\"']+)[\"']")
-                fileRegex.findAll(embedHtml).forEach { match ->
-                    val link = match.groupValues[1]
-                    if (link.isNotBlank() && (link.contains("m3u8") || link.contains("mp4") || link.contains("manifest"))) {
-                        callback(
-                            newExtractorLink(
-                                source = this.name,
-                                name = "${this.name} (Stream)",
-                                url = link,
-                                type = ExtractorLinkType.M3U8
-                            ) {
-                                this.referer = embed
-                                this.quality = Qualities.P1080.value
-                            }
-                        )
-                        success = true
-                    }
-                }
-            }
         }
 
         return success
