@@ -1,26 +1,21 @@
 package com.lagradost
 
-import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import com.fasterxml.jackson.annotation.JsonProperty
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import com.fasterxml.jackson.module.kotlin.readValue
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
-import java.util.Base64
-import javax.crypto.Cipher
-import javax.crypto.Mac
-import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.SecretKeySpec
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.net.URI
 
 private const val LINK_SEP = "|||"
-private var appCtx: Context? = null
 
 @CloudstreamPlugin
 class PhimNguonCPlugin : Plugin() {
-    override fun load(context: Context) {
-        appCtx = context.applicationContext ?: context
+    override fun load(context: android.content.Context) {
         registerMainAPI(PhimNguonCProvider())
     }
 }
@@ -34,8 +29,7 @@ class PhimNguonCProvider : MainAPI() {
     override val supportedTypes = setOf(
         TvType.Movie,
         TvType.TvSeries,
-        TvType.AsianDrama,
-        TvType.NSFW
+        TvType.AsianDrama
     )
 
     override val mainPage = mainPageOf(
@@ -44,10 +38,11 @@ class PhimNguonCProvider : MainAPI() {
         "the-loai/phim-hai" to "Phim Hài",
         "the-loai/chien-tranh" to "Phim Chiến Tranh",
         "the-loai/lich-su" to "Phim Lịch Sử",
-        "the-loai/phim-18" to "Phim 18+",
         "danh-sach/phim-bo" to "Phim Bộ",
         "danh-sach/phim-le" to "Phim Lẻ"
     )
+
+    private val jsonMapper = jacksonObjectMapper()
 
     private fun pageUrl(slug: String) = "$mainUrl/phim/$slug"
 
@@ -129,32 +124,43 @@ class PhimNguonCProvider : MainAPI() {
         }
     }
 
-    private fun openInBrowser(url: String) {
-        val c = appCtx ?: return
-        runCatching {
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                runCatching {
-                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    c.startActivity(intent)
-                }
-            }
-        }
-    }
-
     /**
-     * Giải mã AES-GCM từ Envelope của r25/stream-guard
+     * Bắt tay tự động với streamc.xyz (Bootstrap -> Issue) để lấy direct HLS Playlist
      */
-    private fun decryptEnvelope(ciphertextB64: String, ivHex: String, keyBytes: ByteArray): String? {
+    private suspend fun resolveStreamCPlaylist(embedUrl: String): String? {
         return runCatching {
-            val iv = ivHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-            val combined = Base64.getDecoder().decode(ciphertextB64.trim())
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            val keySpec = SecretKeySpec(keyBytes, "AES")
-            val gcmSpec = GCMParameterSpec(128, iv)
-            cipher.init(Cipher.DECRYPT_MODE, keySpec, gcmSpec)
-            val decrypted = cipher.doFinal(combined)
-            String(decrypted, Charsets.UTF_8)
+            val uri = URI(embedUrl)
+            val origin = "${uri.scheme}://${uri.host}"
+            val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
+
+            val baseHeaders = mapOf(
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Referer" to embedUrl,
+                "Origin" to origin,
+                "Content-Type" to "application/json"
+            )
+
+            // BƯỚC 1: Gửi yêu cầu Bootstrap lấy phiên làm việc
+            val bootPayload = """{"action":"bootstrap","mode":"json","frame_origins":["https://phim.nguonc.com"]}"""
+            val bootResp = app.post(
+                embedUrl,
+                headers = baseHeaders,
+                requestBody = bootPayload.toRequestBody(mediaType)
+            ).text
+
+            val bootJson = jsonMapper.readTree(bootResp)
+            val bootstrapToken = bootJson.get("bootstrap")?.asText() ?: return null
+
+            // BƯỚC 2: Gửi yêu cầu Issue với định dạng HLS để lấy URL Playlist thật
+            val issuePayload = """{"action":"issue","bootstrap":"$bootstrapToken","turnstile_response":null,"playlist_format":"hls","pretty_url":true,"path_chunks":true,"frame_origins":["https://phim.nguonc.com"]}"""
+            val issueResp = app.post(
+                embedUrl,
+                headers = baseHeaders,
+                requestBody = issuePayload.toRequestBody(mediaType)
+            ).text
+
+            val issueJson = jsonMapper.readTree(issueResp)
+            issueJson.get("playlist")?.asText()
         }.getOrNull()
     }
 
@@ -167,12 +173,11 @@ class PhimNguonCProvider : MainAPI() {
         val parts = data.split(LINK_SEP)
         val m3u8 = parts.getOrNull(0).orEmpty()
         val embed = parts.getOrNull(1).orEmpty()
-        val pageUrl = parts.getOrNull(2).orEmpty().ifBlank { mainUrl }
         val ref = "$mainUrl/"
 
         var ok = false
 
-        // 1. Thử request trực tiếp URL m3u8 với Headers giả lập
+        // 1. Nếu có link m3u8 sẵn trong API (trường hợp phim cũ)
         if (m3u8.startsWith("http")) {
             val res = runCatching {
                 app.get(
@@ -197,48 +202,32 @@ class PhimNguonCProvider : MainAPI() {
             }
         }
 
-        // 2. Thử các Extractor có sẵn của CloudStream cho link embed
+        // 2. Xử lý link embed (streamc.xyz) - Giao thức bắt tay 2 bước
         if (embed.startsWith("http")) {
-            val loaded = runCatching {
+            // Giải quyết link HLS từ hệ thống StreamC
+            val playlistUrl = resolveStreamCPlaylist(embed)
+            if (!playlistUrl.isNullOrBlank()) {
+                callback(
+                    ExtractorLink(
+                        source = this.name,
+                        name = "${this.name} (HLS)",
+                        url = playlistUrl,
+                        referer = embed,
+                        quality = Qualities.P1080.value,
+                        isM3u8 = true
+                    )
+                )
+                return true
+            }
+
+            // Fallback: Thử các extractor mặc định khác của CloudStream
+            val extracted = runCatching {
                 loadExtractor(embed, ref, subtitleCallback, callback)
             }.getOrDefault(false)
 
-            if (loaded) return true
+            if (extracted) return true
         }
 
-        // 3. Phân tích trang embed với Referer hợp lệ để lấy thông tin video và link stream
-        if (embed.startsWith("http")) {
-            val embedHtml = runCatching {
-                app.get(
-                    embed,
-                    headers = mapOf(
-                        "Referer" to pageUrl,
-                        "Origin" to mainUrl,
-                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                        "Sec-Fetch-Dest" to "iframe",
-                        "Sec-Fetch-Mode" to "navigate"
-                    )
-                ).text
-            }.getOrNull()
-
-            if (!embedHtml.isNullOrBlank()) {
-                // Tìm kiếm link m3u8 trực tiếp nếu có trong HTML/Script
-                val directM3u8Regex = Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)""")
-                val match = directM3u8Regex.find(embedHtml)?.value
-                if (match != null) {
-                    runCatching {
-                        M3u8Helper.generateM3u8(name, match, embed).forEach {
-                            callback(it)
-                            ok = true
-                        }
-                    }
-                    if (ok) return true
-                }
-            }
-        }
-
-        // 4. Nếu chưa thể lấy luồng tự động, mở browser gốc để xem không bị gián đoạn
-        openInBrowser(pageUrl)
         return false
     }
 
