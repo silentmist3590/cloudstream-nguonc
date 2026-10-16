@@ -14,9 +14,8 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.*
 import java.net.URI
-import kotlin.coroutines.resume
 
 private const val LINK_SEP = "|||"
 private const val TAG = "PhimNguonC"
@@ -155,7 +154,9 @@ class PhimNguonCProvider : MainAPI() {
                         val url = request?.url?.toString().orEmpty()
                         if (url.contains(".m3u8") && !resumed) {
                             resumed = true
-                            continuation.resume(url)
+                            if (continuation.isActive) {
+                                continuation.resume(url)
+                            }
                             webView.post { webView.destroy() }
                         }
                         return super.shouldInterceptRequest(view, request)
@@ -168,14 +169,16 @@ class PhimNguonCProvider : MainAPI() {
                 Handler(Looper.getMainLooper()).postDelayed({
                     if (!resumed) {
                         resumed = true
-                        continuation.resume(null)
+                        if (continuation.isActive) {
+                            continuation.resume(null)
+                        }
                         try {
                             webView.destroy()
                         } catch (_: Exception) {}
                     }
                 }, 12000)
             } catch (e: Exception) {
-                if (!continuation.isCompleted) {
+                if (continuation.isActive) {
                     continuation.resume(null)
                 }
             }
