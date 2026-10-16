@@ -127,7 +127,7 @@ class PhimNguonCProvider : MainAPI() {
     }
 
     /**
-     * Bắt tay tự động với streamc.xyz (Bootstrap -> Issue) để lấy direct HLS Playlist
+     * Bắt tay tự động với hệ thống stream để lấy direct HLS Playlist
      */
     private suspend fun resolveStreamCPlaylist(embedUrl: String): String? {
         return runCatching {
@@ -175,7 +175,8 @@ class PhimNguonCProvider : MainAPI() {
         val parts = data.split(LINK_SEP)
         val m3u8 = parts.getOrNull(0).orEmpty()
         val embed = parts.getOrNull(1).orEmpty()
-        val ref = "$mainUrl/"
+        val webUrl = parts.getOrNull(2).orEmpty()
+        val ref = if (webUrl.isNotBlank()) webUrl else "$mainUrl/"
 
         var ok = false
 
@@ -195,8 +196,22 @@ class PhimNguonCProvider : MainAPI() {
             val text = res?.text?.trim().orEmpty()
             if (text.startsWith("#EXTM3U")) {
                 runCatching {
-                    M3u8Helper.generateM3u8(name, m3u8, ref).forEach {
-                        callback(it)
+                    M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
+                        callback(
+                            ExtractorLink(
+                                source = this.name,
+                                name = link.name,
+                                url = link.url,
+                                referer = ref,
+                                quality = link.quality,
+                                isM3u8 = link.isM3u8,
+                                headers = mapOf(
+                                    "Referer" to ref,
+                                    "Origin" to mainUrl,
+                                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                                )
+                            )
+                        )
                         ok = true
                     }
                 }
@@ -204,11 +219,13 @@ class PhimNguonCProvider : MainAPI() {
             }
         }
 
-        // 2. Xử lý link embed (streamc.xyz) - Giao thức bắt tay 2 bước
+        // 2. Xử lý link embed - Giao thức bắt tay 2 bước và đính kèm đầy đủ Header chống lỗi 403/2004
         if (embed.startsWith("http")) {
-            // Giải quyết link HLS từ hệ thống StreamC
             val playlistUrl = resolveStreamCPlaylist(embed)
             if (!playlistUrl.isNullOrBlank()) {
+                val uri = URI(embed)
+                val origin = "${uri.scheme}://${uri.host}"
+                
                 callback(
                     newExtractorLink(
                         source = this.name,
@@ -217,6 +234,11 @@ class PhimNguonCProvider : MainAPI() {
                         type = ExtractorLinkType.M3U8
                     ) {
                         this.referer = embed
+                        this.headers = mapOf(
+                            "Referer" to embed,
+                            "Origin" to origin,
+                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                        )
                         this.quality = Qualities.P1080.value
                     }
                 )
