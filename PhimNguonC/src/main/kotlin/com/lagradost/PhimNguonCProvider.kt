@@ -1,5 +1,9 @@
 package com.lagradost
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.Toast
 import android.util.Log
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -13,11 +17,16 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URI
 
 private const val LINK_SEP = "|||"
-private const val TAG = "PhimNguonC"
+private const val TAG = "PhimNguonCDebug"
 
 @CloudstreamPlugin
 class PhimNguonCPlugin : Plugin() {
-    override fun load(context: android.content.Context) {
+    companion object {
+        lateinit var appContext: Context
+    }
+
+    override fun load(context: Context) {
+        appContext = context
         registerMainAPI(PhimNguonCProvider())
     }
 }
@@ -45,6 +54,19 @@ class PhimNguonCProvider : MainAPI() {
     )
 
     private val jsonMapper = jacksonObjectMapper()
+
+    private fun copyLogToClipboard(logText: String) {
+        try {
+            val clipboard = PhimNguonCPlugin.appContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = ClipData.newPlainText("PhimNguonC Error Log", logText)
+            clipboard.setPrimaryClip(clip)
+            runCatching {
+                Toast.makeText(PhimNguonCPlugin.appContext, "Đã copy log lỗi vào clipboard!", Toast.LENGTH_LONG).show()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Không thể copy vào clipboard: ${e.message}")
+        }
+    }
 
     private fun pageUrl(slug: String) = "$mainUrl/phim/$slug"
 
@@ -126,9 +148,6 @@ class PhimNguonCProvider : MainAPI() {
         }
     }
 
-    /**
-     * Tự động thực hiện quy trình bắt tay 2 bước (Bootstrap -> Issue) với API embed để lấy link .m3u8 thực tế
-     */
     private suspend fun resolveEmbedPlaylist(embedUrl: String, refererUrl: String): String? {
         return runCatching {
             val uri = URI(embedUrl)
@@ -142,47 +161,42 @@ class PhimNguonCProvider : MainAPI() {
                 "Content-Type" to "application/json"
             )
 
-            // Bước 1: Lấy nội dung trang embed để kiểm tra endpoint API thực tế nếu có
-            val embedHtml = app.get(embedUrl, headers = headers).text
+            val embedResp = app.get(embedUrl, headers = headers)
             var apiUrl = embedUrl
             val apiRegex = Regex("api\\s*[:=]\\s*[\"'](https?://[^\"']+)[\"']")
-            apiRegex.find(embedHtml)?.groupValues?.get(1)?.let {
+            apiRegex.find(embedResp.text)?.groupValues?.get(1)?.let {
                 apiUrl = it
             }
 
-            Log.d(TAG, "API Endpoint được xác định: $apiUrl")
-
-            // Bước 2: Gửi yêu cầu Bootstrap để nhận token phiên làm việc
             val bootPayload = """{"action":"bootstrap","mode":"json","frame_origins":["$mainUrl"]}"""
             val bootResp = app.post(
                 apiUrl,
                 headers = headers,
                 requestBody = bootPayload.toRequestBody(mediaType)
-            ).text
+            )
 
-            val bootJson = jsonMapper.readTree(bootResp)
+            val bootJson = jsonMapper.readTree(bootResp.text)
             val bootstrapToken = bootJson.get("bootstrap")?.asText() 
                 ?: bootJson.get("token")?.asText() 
-                ?: return null
+                ?: throw Exception("Không tìm thấy bootstrap token. Response: ${bootResp.text}")
 
-            Log.d(TAG, "Đã nhận bootstrap token thành công")
-
-            // Bước 3: Gửi yêu cầu Issue với định dạng HLS để lấy URL playlist
             val issuePayload = """{"action":"issue","bootstrap":"$bootstrapToken","turnstile_response":null,"playlist_format":"hls","pretty_url":true,"path_chunks":true,"frame_origins":["$mainUrl"]}"""
             val issueResp = app.post(
                 apiUrl,
                 headers = headers,
                 requestBody = issuePayload.toRequestBody(mediaType)
-            ).text
+            )
 
-            val issueJson = jsonMapper.readTree(issueResp)
+            val issueJson = jsonMapper.readTree(issueResp.text)
             val playlist = issueJson.get("playlist")?.asText() 
                 ?: issueJson.get("url")?.asText()
+                ?: throw Exception("Không tìm thấy playlist trong issue response: ${issueResp.text}")
 
-            Log.d(TAG, "Đã lấy được link playlist HLS: $playlist")
             playlist
         }.onFailure { e ->
-            Log.e(TAG, "Lỗi khi phân giải embed playlist: ${e.message}", e)
+            val errorMsg = "LỖI BẮT TAY EMBED: ${e.localizedMessage} | URL: $embedUrl"
+            Log.e(TAG, errorMsg, e)
+            copyLogToClipboard(errorMsg)
         }.getOrNull()
     }
 
@@ -200,7 +214,6 @@ class PhimNguonCProvider : MainAPI() {
 
         var success = false
 
-        // 1. Kiểm tra link m3u8 trực tiếp nếu có sẵn
         if (m3u8.isNotBlank() && m3u8.startsWith("http") && !m3u8.contains("embed")) {
             success = runCatching {
                 M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
@@ -227,7 +240,6 @@ class PhimNguonCProvider : MainAPI() {
 
         if (success) return true
 
-        // 2. Xử lý link embed thông qua cơ chế giải mã API Bootstrap -> Issue
         if (embed.isNotBlank() && embed.startsWith("http")) {
             val playlistUrl = resolveEmbedPlaylist(embed, ref)
             if (!playlistUrl.isNullOrBlank()) {
@@ -253,10 +265,17 @@ class PhimNguonCProvider : MainAPI() {
                 return true
             }
 
-            // Fallback cuối cùng: Thử loadExtractor tiêu chuẩn
             success = runCatching {
                 loadExtractor(embed, ref, subtitleCallback, callback)
+            }.onFailure { e ->
+                val errorMsg = "LỖI LOAD EXTRACTOR: ${e.localizedMessage} | Embed: $embed"
+                Log.e(TAG, errorMsg, e)
+                copyLogToClipboard(errorMsg)
             }.getOrDefault(false)
+        }
+
+        if (!success) {
+            copyLogToClipboard("KHÔNG TÌM THẤY LIÊN KẾT | Data payload: $data")
         }
 
         return success
