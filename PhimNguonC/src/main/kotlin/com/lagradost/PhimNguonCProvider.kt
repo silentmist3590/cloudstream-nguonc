@@ -136,7 +136,7 @@ class PhimNguonCProvider : MainAPI() {
 
         var found = false
 
-        // 1. Kiểm tra link m3u8 trực tiếp nếu có sẵn
+        // 1. Nếu có link m3u8 sẵn trong API -> Đưa thẳng vào M3u8Helper để parse chất lượng
         if (m3u8.startsWith("http")) {
             runCatching {
                 M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
@@ -145,43 +145,29 @@ class PhimNguonCProvider : MainAPI() {
                 }
             }
             if (found) return true
+
+            // Fallback trực tiếp nếu generateM3u8 không bắt được
+            callback(
+                newExtractorLink(
+                    source = this.name,
+                    name = "${this.name} (M3U8)",
+                    url = m3u8,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = ref
+                    this.quality = Qualities.P1080.value
+                }
+            )
+            return true
         }
 
-        // 2. Xử lý link embed
+        // 2. Nếu có link embed -> Gọi loadExtractor chuẩn của Cloudstream
         if (embed.startsWith("http")) {
-            // Thử dùng loadExtractor chuẩn của Cloudstream trước
             val extracted = runCatching {
                 loadExtractor(embed, ref, subtitleCallback, callback)
             }.getOrDefault(false)
 
             if (extracted) return true
-
-            // Fallback: Tải trang embed và quét tìm link .m3u8 bên trong mã nguồn
-            val embedHtml = runCatching {
-                app.get(embed, headers = mapOf("Referer" to ref)).text
-            }.getOrNull()
-
-            if (!embedHtml.isNullOrBlank()) {
-                val m3u8Regex = Regex("\"(https?://[^\"]+\\.m3u8[^\"]*)\"|'(https?://[^']+\\.m3u8[^']*)'")
-                m3u8Regex.findAll(embedHtml).forEach { match ->
-                    val link = match.groupValues[1].ifEmpty { match.groupValues[2] }
-                    if (link.isNotBlank()) {
-                        callback(
-                            newExtractorLink(
-                                source = this.name,
-                                name = "${this.name} (HLS)",
-                                url = link,
-                                type = ExtractorLinkType.M3U8
-                            ) {
-                                this.referer = embed
-                                this.quality = Qualities.P1080.value
-                            }
-                        )
-                        found = true
-                    }
-                }
-                if (found) return true
-            }
         }
 
         return false
