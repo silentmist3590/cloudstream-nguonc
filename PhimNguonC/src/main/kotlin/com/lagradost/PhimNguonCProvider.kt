@@ -138,7 +138,6 @@ class PhimNguonCProvider : MainAPI() {
 
         var found = false
 
-        // 1. Xử lý link m3u8 trực tiếp nếu có
         if (m3u8.isNotBlank() && m3u8.startsWith("http") && !m3u8.contains("embed")) {
             runCatching {
                 M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
@@ -164,7 +163,6 @@ class PhimNguonCProvider : MainAPI() {
 
         if (found) return true
 
-        // 2. Xử lý chuyên sâu cho trang embed (streamc.xyz) với đầy đủ Header giả lập
         if (embed.isNotBlank() && embed.startsWith("http")) {
             val embedHeaders = mapOf(
                 "Referer" to ref,
@@ -173,14 +171,12 @@ class PhimNguonCProvider : MainAPI() {
                 "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
             )
 
-            // Thử dùng loadExtractor chuẩn trước kèm theo headers
             found = runCatching {
                 loadExtractor(embed, ref, subtitleCallback, callback)
             }.getOrDefault(false)
 
             if (found) return true
 
-            // Tải mã nguồn trang embed vượt qua lớp chặn nhờ bộ header giả lập trang gốc
             val embedHtml = runCatching {
                 app.get(embed, headers = embedHeaders).text
             }.getOrNull()
@@ -218,7 +214,7 @@ class PhimNguonCProvider : MainAPI() {
                                 source = this.name,
                                 name = "${this.name} (StreamC Direct)",
                                 url = streamUrl,
-                                type = if (streamUrl.contains("m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.Video
+                                type = if (streamUrl.contains("m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                             ) {
                                 this.referer = embed
                                 this.quality = Qualities.P1080.value
