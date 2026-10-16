@@ -158,14 +158,12 @@ class PhimNguonCProvider : MainAPI() {
 
         // 2. Xử lý trường embed và quét mã nguồn trang phát
         if (embed.isNotBlank()) {
-            // Thử dùng loadExtractor trước
             success = runCatching {
                 loadExtractor(embed, ref, subtitleCallback, callback)
             }.getOrDefault(false)
 
             if (success) return true
 
-            // Nếu loadExtractor không bắt được, tải HTML trang embed và quét tìm link stream / m3u8 / mp4
             val embedHtml = runCatching {
                 app.get(
                     embed,
@@ -177,7 +175,6 @@ class PhimNguonCProvider : MainAPI() {
             }.getOrNull()
 
             if (!embedHtml.isNullOrBlank()) {
-                // Quét tìm các định dạng m3u8 hoặc mp4 trong mã nguồn HTML / Script
                 val urlRegex = Regex("\"(https?://[^\"]+?\\.(?:m3u8|mp4)[^\"]*)\"|'(https?://[^']+?\\.(?:m3u8|mp4)[^']*)'")
                 urlRegex.findAll(embedHtml).forEach { match ->
                     val link = match.groupValues[1].ifEmpty { match.groupValues[2] }
@@ -187,7 +184,7 @@ class PhimNguonCProvider : MainAPI() {
                                 source = this.name,
                                 name = "${this.name} (HLS)",
                                 url = link,
-                                type = if (link.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.Video
+                                type = ExtractorLinkType.M3U8
                             ) {
                                 this.referer = embed
                                 this.quality = Qualities.P1080.value
@@ -197,7 +194,6 @@ class PhimNguonCProvider : MainAPI() {
                     }
                 }
 
-                // Quét tìm các biến cấu hình file/source trong JS
                 val fileRegex = Regex("(?:file|url|source|src)\\s*[:=]\\s*[\"'](https?://[^\"']+)[\"']")
                 fileRegex.findAll(embedHtml).forEach { match ->
                     val link = match.groupValues[1]
@@ -207,7 +203,7 @@ class PhimNguonCProvider : MainAPI() {
                                 source = this.name,
                                 name = "${this.name} (Stream)",
                                 url = link,
-                                type = if (link.contains("m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.Video
+                                type = ExtractorLinkType.M3U8
                             ) {
                                 this.referer = embed
                                 this.quality = Qualities.P1080.value
@@ -261,6 +257,7 @@ class PhimNguonCProvider : MainAPI() {
         val name: String?,
         @JsonProperty("original_name") val originalName: String?,
         val slug: String?,
+        val year: Int?,
         val description: String?,
         @JsonProperty("poster_url") val posterUrl: String?,
         @JsonProperty("thumb_url") val thumbUrl: String?,
