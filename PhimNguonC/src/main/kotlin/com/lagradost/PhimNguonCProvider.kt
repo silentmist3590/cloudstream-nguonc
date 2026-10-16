@@ -1,24 +1,34 @@
 package com.lagradost
 
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import com.fasterxml.jackson.annotation.JsonProperty
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.suspendCancellableCoroutine
+import java.net.URI
+import kotlin.coroutines.resume
 
-// Ngăn cách giữa link m3u8 (nếu có) và địa chỉ trang phim trong dữ liệu của mỗi tập
 private const val LINK_SEP = "|||"
-
-// Context của ứng dụng, dùng để mở trình duyệt
-private var appCtx: Context? = null
+private const val TAG = "PhimNguonC"
 
 @CloudstreamPlugin
 class PhimNguonCPlugin : Plugin() {
+    companion object {
+        lateinit var appContext: Context
+    }
+
     override fun load(context: Context) {
-        appCtx = context.applicationContext ?: context
+        appContext = context
         registerMainAPI(PhimNguonCProvider())
     }
 }
@@ -32,8 +42,7 @@ class PhimNguonCProvider : MainAPI() {
     override val supportedTypes = setOf(
         TvType.Movie,
         TvType.TvSeries,
-        TvType.AsianDrama,
-        TvType.NSFW
+        TvType.AsianDrama
     )
 
     override val mainPage = mainPageOf(
@@ -42,15 +51,14 @@ class PhimNguonCProvider : MainAPI() {
         "the-loai/phim-hai" to "Phim Hài",
         "the-loai/chien-tranh" to "Phim Chiến Tranh",
         "the-loai/lich-su" to "Phim Lịch Sử",
-        "the-loai/phim-18" to "Phim 18+",
         "danh-sach/phim-bo" to "Phim Bộ",
         "danh-sach/phim-le" to "Phim Lẻ"
     )
 
-    // Địa chỉ trang web của phim (dùng cho nút mở trình duyệt trong CloudStream)
+    private val jsonMapper = jacksonObjectMapper()
+
     private fun pageUrl(slug: String) = "$mainUrl/phim/$slug"
 
-    // Lấy slug từ địa chỉ trang web hoặc địa chỉ API cũ (đã lưu trong lịch sử/yêu thích)
     private fun slugOf(url: String) =
         url.trimEnd('/').substringAfterLast('/').substringBefore('?')
 
@@ -61,7 +69,6 @@ class PhimNguonCProvider : MainAPI() {
         val url = "$mainUrl/api/films/${request.data}?page=$page"
         val res = app.get(url).parsedSafe<NguonCListResponse>()
         val homeItems = res?.items?.mapNotNull { it.toSearchResponse() } ?: emptyList()
-
         val hasNext = (res?.paginate?.currentPage ?: 0) < (res?.paginate?.totalPage ?: 0)
         return newHomePageResponse(request.name, homeItems, hasNext = hasNext)
     }
@@ -100,10 +107,13 @@ class PhimNguonCProvider : MainAPI() {
             server.items?.forEach { ep ->
                 val epName = ep.name ?: "1"
                 val epNum = epName.toIntOrNull()
-                // Chỉ giữ lại link m3u8 từ API; nếu trống thì tập vẫn hiện nhưng chưa phát được
-                if (!ep.m3u8.isNullOrBlank() || !ep.embed.isNullOrBlank()) {
+                val m3u8 = ep.m3u8.orEmpty()
+                val embed = ep.embed.orEmpty()
+
+                if (m3u8.isNotBlank() || embed.isNotBlank()) {
+                    val dataPayload = "$m3u8$LINK_SEP$embed$LINK_SEP$webUrl"
                     episodes.add(
-                        newEpisode("${ep.m3u8.orEmpty()}$LINK_SEP$webUrl") {
+                        newEpisode(dataPayload) {
                             this.name = "$serverName - Tập $epName"
                             this.episode = epNum
                         }
@@ -127,48 +137,108 @@ class PhimNguonCProvider : MainAPI() {
         }
     }
 
-    private fun openInBrowser(url: String) {
-        val c = appCtx ?: return
-        runCatching {
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                runCatching {
-                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    c.startActivity(intent)
+    private suspend fun resolveWithWebView(embedUrl: String, refererUrl: String): String? = suspendCancellableCoroutine { continuation ->
+        Handler(Looper.getMainLooper()).post {
+            try {
+                val context = PhimNguonCPlugin.appContext
+                val webView = WebView(context).apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.loadsImagesAutomatically = false
+                    settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                }
+
+                var resumed = false
+
+                webView.webViewClient = object : WebViewClient() {
+                    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                        val url = request?.url?.toString().orEmpty()
+                        if (url.contains(".m3u8") && !resumed) {
+                            resumed = true
+                            continuation.resume(url)
+                            webView.post { webView.destroy() }
+                        }
+                        return super.shouldInterceptRequest(view, request)
+                    }
+                }
+
+                val headers = mapOf("Referer" to refererUrl)
+                webView.loadUrl(embedUrl, headers)
+
+                Handler(Looper.getMainLooper()).postDelayed({
+                    if (!resumed) {
+                        resumed = true
+                        continuation.resume(null)
+                        try {
+                            webView.destroy()
+                        } catch (_: Exception) {}
+                    }
+                }, 12000)
+            } catch (e: Exception) {
+                if (!continuation.isCompleted) {
+                    continuation.resume(null)
                 }
             }
         }
     }
 
-    // Chọn tập: nếu API có playlist HLS thật thì phát ngay trong CloudStream,
-    // ngược lại mở trang phim trên trình duyệt để xem bằng trình phát của chính trang.
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val parts = data.split(LINK_SEP, limit = 2)
+        val parts = data.split(LINK_SEP)
         val m3u8 = parts.getOrNull(0).orEmpty()
-        val pageUrl = parts.getOrNull(1).orEmpty().ifBlank { mainUrl }
-        val ref = "$mainUrl/"
+        val embed = parts.getOrNull(1).orEmpty()
+        val webUrl = parts.getOrNull(2).orEmpty()
+        val ref = if (webUrl.isNotBlank()) webUrl else "$mainUrl/"
 
-        if (m3u8.startsWith("http")) {
-            val body = runCatching { app.get(m3u8, referer = ref).text }.getOrNull()
-            if (body?.trimStart()?.startsWith("#EXTM3U") == true) {
-                var ok = false
-                runCatching {
-                    M3u8Helper.generateM3u8(name, m3u8, ref).forEach {
-                        callback(it)
-                        ok = true
+        var found = false
+
+        if (m3u8.isNotBlank() && m3u8.startsWith("http") && !m3u8.contains("embed")) {
+            runCatching {
+                if (m3u8.contains(".m3u8")) {
+                    M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
+                        callback(link)
+                        found = true
                     }
                 }
-                if (ok) return true
             }
         }
 
-        openInBrowser(pageUrl)
-        return false
+        if (found) return true
+
+        if (embed.isNotBlank() && embed.startsWith("http")) {
+            val interceptedM3u8 = resolveWithWebView(embed, ref)
+            if (!interceptedM3u8.isNullOrBlank() && interceptedM3u8.contains(".m3u8")) {
+                val uri = runCatching { URI(embed) }.getOrNull()
+                val origin = if (uri != null) "${uri.scheme}://${uri.host}" else mainUrl
+
+                callback(
+                    newExtractorLink(
+                        source = this.name,
+                        name = "${this.name} (WebView HLS)",
+                        url = interceptedM3u8,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = embed
+                        this.quality = Qualities.P1080.value
+                        this.headers = mapOf(
+                            "Referer" to embed,
+                            "Origin" to origin
+                        )
+                    }
+                )
+                return true
+            }
+
+            found = runCatching {
+                loadExtractor(embed, ref, subtitleCallback, callback)
+            }.getOrDefault(false)
+        }
+
+        return found
     }
 
     data class NguonCPaginate(
