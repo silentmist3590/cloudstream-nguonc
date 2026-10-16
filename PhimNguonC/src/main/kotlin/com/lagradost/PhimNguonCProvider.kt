@@ -8,6 +8,7 @@ import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import java.net.URI
 
 private const val LINK_SEP = "|||"
 
@@ -134,7 +135,7 @@ class PhimNguonCProvider : MainAPI() {
         val webUrl = parts.getOrNull(2).orEmpty()
         val ref = if (webUrl.isNotBlank()) webUrl else "$mainUrl/"
 
-        // 1. Xử lý link m3u8 trực tiếp nếu có sẵn
+        // 1. Nếu có sẵn link m3u8 trực tiếp
         if (m3u8.startsWith("http")) {
             val success = runCatching {
                 M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
@@ -145,14 +146,44 @@ class PhimNguonCProvider : MainAPI() {
             if (success) return true
         }
 
-        // 2. Xử lý link embed thông qua cơ chế WebViewExtractor nội bộ của Cloudstream
-        // Giúp chạy thành công các script giải mã AES-GCM / Web Crypto trên trang phát
+        // 2. Xử lý link embed thông qua WebViewResolver để thực thi JS giải mã và bắt link m3u8
         if (embed.startsWith("http")) {
+            // Thử load qua loadExtractor trước
             val extracted = runCatching {
                 loadExtractor(embed, ref, subtitleCallback, callback)
             }.getOrDefault(false)
 
             if (extracted) return true
+
+            // Nếu loadExtractor chưa bắt được, dùng WebViewResolver để bắt URL .m3u8 sau khi render
+            val resolvedM3u8 = runCatching {
+                WebViewResolver(
+                    Regex(".*\\.m3u8.*")
+                ).resolve(embed)
+            }.getOrNull()
+
+            if (!resolvedM3u8.isNullOrBlank()) {
+                val uri = URI(embed)
+                val origin = "${uri.scheme}://${uri.host}"
+
+                callback(
+                    newExtractorLink(
+                        source = this.name,
+                        name = "${this.name} (HLS)",
+                        url = resolvedM3u8,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = embed
+                        this.quality = Qualities.P1080.value
+                        this.headers = mapOf(
+                            "Referer" to embed,
+                            "Origin" to origin,
+                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                        )
+                    }
+                )
+                return true
+            }
         }
 
         return false
