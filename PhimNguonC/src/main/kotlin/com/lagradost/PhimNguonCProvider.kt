@@ -14,8 +14,9 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.*
 import java.net.URI
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 private const val LINK_SEP = "|||"
 private const val TAG = "PhimNguonC"
@@ -136,7 +137,10 @@ class PhimNguonCProvider : MainAPI() {
         }
     }
 
-    private suspend fun resolveWithWebView(embedUrl: String, refererUrl: String): String? = suspendCancellableCoroutine { continuation ->
+    private fun resolveWithWebView(embedUrl: String, refererUrl: String): String? {
+        var interceptedUrl: String? = null
+        val latch = CountDownLatch(1)
+
         Handler(Looper.getMainLooper()).post {
             try {
                 val context = PhimNguonCPlugin.appContext
@@ -147,16 +151,15 @@ class PhimNguonCProvider : MainAPI() {
                     settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
                 }
 
-                var resumed = false
+                var resolved = false
 
                 webView.webViewClient = object : WebViewClient() {
                     override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                         val url = request?.url?.toString().orEmpty()
-                        if (url.contains(".m3u8") && !resumed) {
-                            resumed = true
-                            if (continuation.isActive) {
-                                continuation.resume(url)
-                            }
+                        if (url.contains(".m3u8") && !resolved) {
+                            resolved = true
+                            interceptedUrl = url
+                            latch.countDown()
                             webView.post { webView.destroy() }
                         }
                         return super.shouldInterceptRequest(view, request)
@@ -165,24 +168,16 @@ class PhimNguonCProvider : MainAPI() {
 
                 val headers = mapOf("Referer" to refererUrl)
                 webView.loadUrl(embedUrl, headers)
-
-                Handler(Looper.getMainLooper()).postDelayed({
-                    if (!resumed) {
-                        resumed = true
-                        if (continuation.isActive) {
-                            continuation.resume(null)
-                        }
-                        try {
-                            webView.destroy()
-                        } catch (_: Exception) {}
-                    }
-                }, 12000)
             } catch (e: Exception) {
-                if (continuation.isActive) {
-                    continuation.resume(null)
-                }
+                latch.countDown()
             }
         }
+
+        try {
+            latch.await(12, TimeUnit.SECONDS)
+        } catch (_: Exception) {}
+
+        return interceptedUrl
     }
 
     override suspend fun loadLinks(
