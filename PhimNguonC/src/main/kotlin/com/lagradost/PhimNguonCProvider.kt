@@ -19,7 +19,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 private const val LINK_SEP = "|||"
-private const val TAG = "PhimNguonC"
+private const val TAG = "PhimNguonCDebug"
 
 @CloudstreamPlugin
 class PhimNguonCPlugin : Plugin() {
@@ -137,8 +137,8 @@ class PhimNguonCProvider : MainAPI() {
         }
     }
 
-    private fun resolveWithWebView(embedUrl: String, refererUrl: String): String? {
-        var interceptedUrl: String? = null
+    private fun resolveWithAdvancedWebView(embedUrl: String, refererUrl: String): String? {
+        var resolvedUrl: String? = null
         val latch = CountDownLatch(1)
 
         Handler(Looper.getMainLooper()).post {
@@ -147,26 +147,58 @@ class PhimNguonCProvider : MainAPI() {
                 val webView = WebView(context).apply {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
-                    settings.loadsImagesAutomatically = false
+                    settings.loadsImagesAutomatically = true
                     settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
                 }
 
-                var resolved = false
+                var isFinished = false
 
                 webView.webViewClient = object : WebViewClient() {
                     override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                         val url = request?.url?.toString().orEmpty()
-                        if (url.contains(".m3u8") && !resolved) {
-                            resolved = true
-                            interceptedUrl = url
+                        Log.d(TAG, "Intercepted: $url")
+                        if ((url.contains(".m3u8") || url.contains("playlist") || url.contains("manifest")) && !isFinished) {
+                            isFinished = true
+                            resolvedUrl = url
                             latch.countDown()
                             webView.post { webView.destroy() }
                         }
                         return super.shouldInterceptRequest(view, request)
                     }
+
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        super.onPageFinished(view, url)
+                        view?.evaluateJavascript(
+                            """
+                            (function() {
+                                var v = document.querySelector('video');
+                                if (v && v.src) return v.src;
+                                if (window.hls && window.hls.url) return window.hls.url;
+                                var sources = document.querySelectorAll('source');
+                                for(var i=0; i<sources.length; i++) {
+                                    if(sources[i].src) return sources[i].src;
+                                }
+                                return '';
+                            })();
+                            """.trimIndent()
+                        ) { result ->
+                            if (!isFinished && !result.isNullOrBlank() && result != "null" && result != "\"\"") {
+                                val clean = result.removeSurrounding("\"")
+                                if (clean.isNotBlank() && (clean.contains(".m3u8") || clean.contains(".mp4"))) {
+                                    isFinished = true
+                                    resolvedUrl = clean
+                                    latch.countDown()
+                                    webView.post { webView.destroy() }
+                                }
+                            }
+                        }
+                    }
                 }
 
-                val headers = mapOf("Referer" to refererUrl)
+                val headers = mapOf(
+                    "Referer" to refererUrl,
+                    "Origin" to "https://${URI(embedUrl).host}"
+                )
                 webView.loadUrl(embedUrl, headers)
             } catch (e: Exception) {
                 latch.countDown()
@@ -174,10 +206,10 @@ class PhimNguonCProvider : MainAPI() {
         }
 
         try {
-            latch.await(12, TimeUnit.SECONDS)
+            latch.await(15, TimeUnit.SECONDS)
         } catch (_: Exception) {}
 
-        return interceptedUrl
+        return resolvedUrl
     }
 
     override suspend fun loadLinks(
@@ -208,17 +240,17 @@ class PhimNguonCProvider : MainAPI() {
         if (found) return true
 
         if (embed.isNotBlank() && embed.startsWith("http")) {
-            val interceptedM3u8 = resolveWithWebView(embed, ref)
-            if (!interceptedM3u8.isNullOrBlank() && interceptedM3u8.contains(".m3u8")) {
+            val intercepted = resolveWithAdvancedWebView(embed, ref)
+            if (!intercepted.isNullOrBlank()) {
                 val uri = runCatching { URI(embed) }.getOrNull()
                 val origin = if (uri != null) "${uri.scheme}://${uri.host}" else mainUrl
 
                 callback(
                     newExtractorLink(
                         source = this.name,
-                        name = "${this.name} (WebView HLS)",
-                        url = interceptedM3u8,
-                        type = ExtractorLinkType.M3U8
+                        name = "${this.name} (Advanced WebView)",
+                        url = intercepted,
+                        type = if (intercepted.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     ) {
                         this.referer = embed
                         this.quality = Qualities.P1080.value
