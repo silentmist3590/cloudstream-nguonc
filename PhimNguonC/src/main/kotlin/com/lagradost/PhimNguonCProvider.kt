@@ -8,7 +8,6 @@ import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import java.net.URI
 
 private const val LINK_SEP = "|||"
 
@@ -135,54 +134,53 @@ class PhimNguonCProvider : MainAPI() {
         val webUrl = parts.getOrNull(2).orEmpty()
         val ref = if (webUrl.isNotBlank()) webUrl else "$mainUrl/"
 
-        // 1. Nếu có sẵn link m3u8 trực tiếp
+        var found = false
+
+        // 1. Kiểm tra link m3u8 trực tiếp nếu có sẵn
         if (m3u8.startsWith("http")) {
-            val success = runCatching {
+            runCatching {
                 M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
                     callback(link)
+                    found = true
                 }
-                true
-            }.getOrDefault(false)
-            if (success) return true
+            }
+            if (found) return true
         }
 
-        // 2. Xử lý link embed thông qua WebViewResolver để thực thi JS giải mã và bắt link m3u8
+        // 2. Xử lý link embed
         if (embed.startsWith("http")) {
-            // Thử load qua loadExtractor trước
+            // Thử dùng loadExtractor chuẩn của Cloudstream trước
             val extracted = runCatching {
                 loadExtractor(embed, ref, subtitleCallback, callback)
             }.getOrDefault(false)
 
             if (extracted) return true
 
-            // Nếu loadExtractor chưa bắt được, dùng WebViewResolver để bắt URL .m3u8 sau khi render
-            val resolvedM3u8 = runCatching {
-                WebViewResolver(
-                    Regex(".*\\.m3u8.*")
-                ).resolve(embed)
+            // Fallback: Tải trang embed và quét tìm link .m3u8 bên trong mã nguồn
+            val embedHtml = runCatching {
+                app.get(embed, headers = mapOf("Referer" to ref)).text
             }.getOrNull()
 
-            if (!resolvedM3u8.isNullOrBlank()) {
-                val uri = URI(embed)
-                val origin = "${uri.scheme}://${uri.host}"
-
-                callback(
-                    newExtractorLink(
-                        source = this.name,
-                        name = "${this.name} (HLS)",
-                        url = resolvedM3u8,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = embed
-                        this.quality = Qualities.P1080.value
-                        this.headers = mapOf(
-                            "Referer" to embed,
-                            "Origin" to origin,
-                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            if (!embedHtml.isNullOrBlank()) {
+                val m3u8Regex = Regex("\"(https?://[^\"]+\\.m3u8[^\"]*)\"|'(https?://[^']+\\.m3u8[^']*)'")
+                m3u8Regex.findAll(embedHtml).forEach { match ->
+                    val link = match.groupValues[1].ifEmpty { match.groupValues[2] }
+                    if (link.isNotBlank()) {
+                        callback(
+                            newExtractorLink(
+                                source = this.name,
+                                name = "${this.name} (HLS)",
+                                url = link,
+                                type = ExtractorLinkType.M3U8
+                            ) {
+                                this.referer = embed
+                                this.quality = Qualities.P1080.value
+                            }
                         )
+                        found = true
                     }
-                )
-                return true
+                }
+                if (found) return true
             }
         }
 
