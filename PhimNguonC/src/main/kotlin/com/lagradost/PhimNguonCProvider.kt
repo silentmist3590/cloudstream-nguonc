@@ -1,5 +1,6 @@
 package com.lagradost
 
+import android.util.Log
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
@@ -7,9 +8,9 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
 
 private const val LINK_SEP = "|||"
+private const val TAG = "PhimNguonC"
 
 @CloudstreamPlugin
 class PhimNguonCPlugin : Plugin() {
@@ -134,43 +135,37 @@ class PhimNguonCProvider : MainAPI() {
         val webUrl = parts.getOrNull(2).orEmpty()
         val ref = if (webUrl.isNotBlank()) webUrl else "$mainUrl/"
 
-        var found = false
+        var success = false
 
-        // 1. Nếu có link m3u8 sẵn trong API -> Đưa thẳng vào M3u8Helper để parse chất lượng
-        if (m3u8.startsWith("http")) {
-            runCatching {
-                M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
-                    callback(link)
-                    found = true
-                }
+        // 1. Kiểm tra trường m3u8: chỉ xử lý nếu thực sự là link .m3u8 sạch không kèm mã độc quyền/embed
+        if (m3u8.isNotBlank()) {
+            if (m3u8.contains(".m3u8") && !m3u8.contains("embed") && !m3u8.contains("player")) {
+                success = runCatching {
+                    M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
+                        callback(link)
+                    }
+                    true
+                }.getOrDefault(false)
             }
-            if (found) return true
 
-            // Fallback trực tiếp nếu generateM3u8 không bắt được
-            callback(
-                newExtractorLink(
-                    source = this.name,
-                    name = "${this.name} (M3U8)",
-                    url = m3u8,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    this.referer = ref
-                    this.quality = Qualities.P1080.value
-                }
-            )
-            return true
+            // Nếu không phải m3u8 trực tiếp, thử đưa qua loadExtractor
+            if (!success) {
+                success = runCatching {
+                    loadExtractor(m3u8, ref, subtitleCallback, callback)
+                }.getOrDefault(false)
+            }
         }
 
-        // 2. Nếu có link embed -> Gọi loadExtractor chuẩn của Cloudstream
-        if (embed.startsWith("http")) {
-            val extracted = runCatching {
+        if (success) return true
+
+        // 2. Nếu trường m3u8 không chạy được, chuyển qua xử lý trường embed
+        if (embed.isNotBlank()) {
+            success = runCatching {
                 loadExtractor(embed, ref, subtitleCallback, callback)
             }.getOrDefault(false)
-
-            if (extracted) return true
         }
 
-        return false
+        return success
     }
 
     data class NguonCPaginate(
