@@ -211,14 +211,15 @@ class PhimNguonCProvider : MainAPI() {
             if (!playlistUrl.isNullOrBlank()) {
                 callback(
                     newExtractorLink(
-    source = this.name,
-    name = "${this.name} (HLS)",
-    url = playlistUrl,
-    type = ExtractorLinkType.M3U8
-) {
-    this.referer = embed
-    this.quality = Qualities.P1080.value
-}
+                        source = this.name,
+                        name = "${this.name} (HLS)",
+                        url = playlistUrl,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = embed
+                        this.quality = Qualities.P1080.value
+                    }
+                )
                 return true
             }
 
