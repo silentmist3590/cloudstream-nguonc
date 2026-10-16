@@ -137,7 +137,7 @@ class PhimNguonCProvider : MainAPI() {
 
         var success = false
 
-        // 1. Kiểm tra trường m3u8: chỉ xử lý nếu thực sự là link .m3u8 sạch không kèm mã độc quyền/embed
+        // 1. Xử lý trường m3u8 nếu có sẵn
         if (m3u8.isNotBlank()) {
             if (m3u8.contains(".m3u8") && !m3u8.contains("embed") && !m3u8.contains("player")) {
                 success = runCatching {
@@ -147,8 +147,6 @@ class PhimNguonCProvider : MainAPI() {
                     true
                 }.getOrDefault(false)
             }
-
-            // Nếu không phải m3u8 trực tiếp, thử đưa qua loadExtractor
             if (!success) {
                 success = runCatching {
                     loadExtractor(m3u8, ref, subtitleCallback, callback)
@@ -158,11 +156,67 @@ class PhimNguonCProvider : MainAPI() {
 
         if (success) return true
 
-        // 2. Nếu trường m3u8 không chạy được, chuyển qua xử lý trường embed
+        // 2. Xử lý trường embed và quét mã nguồn trang phát
         if (embed.isNotBlank()) {
+            // Thử dùng loadExtractor trước
             success = runCatching {
                 loadExtractor(embed, ref, subtitleCallback, callback)
             }.getOrDefault(false)
+
+            if (success) return true
+
+            // Nếu loadExtractor không bắt được, tải HTML trang embed và quét tìm link stream / m3u8 / mp4
+            val embedHtml = runCatching {
+                app.get(
+                    embed,
+                    headers = mapOf(
+                        "Referer" to ref,
+                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                    )
+                ).text
+            }.getOrNull()
+
+            if (!embedHtml.isNullOrBlank()) {
+                // Quét tìm các định dạng m3u8 hoặc mp4 trong mã nguồn HTML / Script
+                val urlRegex = Regex("\"(https?://[^\"]+?\\.(?:m3u8|mp4)[^\"]*)\"|'(https?://[^']+?\\.(?:m3u8|mp4)[^']*)'")
+                urlRegex.findAll(embedHtml).forEach { match ->
+                    val link = match.groupValues[1].ifEmpty { match.groupValues[2] }
+                    if (link.isNotBlank()) {
+                        callback(
+                            newExtractorLink(
+                                source = this.name,
+                                name = "${this.name} (HLS)",
+                                url = link,
+                                type = if (link.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.Video
+                            ) {
+                                this.referer = embed
+                                this.quality = Qualities.P1080.value
+                            }
+                        )
+                        success = true
+                    }
+                }
+
+                // Quét tìm các biến cấu hình file/source trong JS
+                val fileRegex = Regex("(?:file|url|source|src)\\s*[:=]\\s*[\"'](https?://[^\"']+)[\"']")
+                fileRegex.findAll(embedHtml).forEach { match ->
+                    val link = match.groupValues[1]
+                    if (link.isNotBlank() && (link.contains("m3u8") || link.contains("mp4") || link.contains("manifest"))) {
+                        callback(
+                            newExtractorLink(
+                                source = this.name,
+                                name = "${this.name} (Stream)",
+                                url = link,
+                                type = if (link.contains("m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.Video
+                            ) {
+                                this.referer = embed
+                                this.quality = Qualities.P1080.value
+                            }
+                        )
+                        success = true
+                    }
+                }
+            }
         }
 
         return success
@@ -207,7 +261,6 @@ class PhimNguonCProvider : MainAPI() {
         val name: String?,
         @JsonProperty("original_name") val originalName: String?,
         val slug: String?,
-        val year: Int?,
         val description: String?,
         @JsonProperty("poster_url") val posterUrl: String?,
         @JsonProperty("thumb_url") val thumbUrl: String?,
