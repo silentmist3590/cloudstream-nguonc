@@ -1,11 +1,5 @@
 package com.lagradost
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
-import android.os.Handler
-import android.os.Looper
-import android.widget.Toast
 import android.util.Log
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -16,16 +10,11 @@ import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
 
 private const val LINK_SEP = "|||"
-private const val TAG = "PhimNguonCDebug"
+private const val TAG = "PhimNguonC"
 
 @CloudstreamPlugin
 class PhimNguonCPlugin : Plugin() {
-    companion object {
-        lateinit var appContext: Context
-    }
-
-    override fun load(context: Context) {
-        appContext = context
+    override fun load(context: android.content.Context) {
         registerMainAPI(PhimNguonCProvider())
     }
 }
@@ -53,20 +42,6 @@ class PhimNguonCProvider : MainAPI() {
     )
 
     private val jsonMapper = jacksonObjectMapper()
-
-    private fun copyLogToClipboard(logText: String) {
-        try {
-            Handler(Looper.getMainLooper()).post {
-                val context = PhimNguonCPlugin.appContext
-                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                val clip = ClipData.newPlainText("PhimNguonC Error Log", logText)
-                clipboard.setPrimaryClip(clip)
-                Toast.makeText(context, "Đã copy log lỗi vào clipboard!", Toast.LENGTH_LONG).show()
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Không thể copy vào clipboard: ${e.message}")
-        }
-    }
 
     private fun pageUrl(slug: String) = "$mainUrl/phim/$slug"
 
@@ -160,18 +135,17 @@ class PhimNguonCProvider : MainAPI() {
         val webUrl = parts.getOrNull(2).orEmpty()
         val ref = if (webUrl.isNotBlank()) webUrl else "$mainUrl/"
 
-        var success = false
+        var found = false
 
-        // 1. Thử xử lý link m3u8 trực tiếp nếu có
+        // 1. Xử lý link m3u8 nếu có
         if (m3u8.isNotBlank() && m3u8.startsWith("http")) {
-            success = runCatching {
+            runCatching {
                 M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
                     callback(link)
+                    found = true
                 }
-                true
-            }.getOrDefault(false)
-
-            if (!success) {
+            }
+            if (!found) {
                 callback(
                     newExtractorLink(
                         source = this.name,
@@ -183,79 +157,36 @@ class PhimNguonCProvider : MainAPI() {
                         this.quality = Qualities.P1080.value
                     }
                 )
-                success = true
+                found = true
             }
         }
 
-        if (success) return true
+        if (found) return true
 
-        // 2. Thử dùng loadExtractor tiêu chuẩn cho link embed
+        // 2. Xử lý link embed qua loadExtractor
         if (embed.isNotBlank() && embed.startsWith("http")) {
-            success = runCatching {
+            found = runCatching {
                 loadExtractor(embed, ref, subtitleCallback, callback)
             }.getOrDefault(false)
 
-            if (success) return true
+            if (found) return true
 
-            // 3. Fallback: Tải mã nguồn trang embed và quét tìm link m3u8 / mp4 / source bên trong
-            val embedHtml = runCatching {
-                app.get(
-                    embed,
-                    headers = mapOf(
-                        "Referer" to ref,
-                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                    )
-                ).text
-            }.getOrNull()
-
-            if (!embedHtml.isNullOrBlank()) {
-                val urlRegex = Regex("\"(https?://[^\"]+?\\.(?:m3u8|mp4)[^\"]*)\"|'(https?://[^']+?\\.(?:m3u8|mp4)[^']*)'")
-                urlRegex.findAll(embedHtml).forEach { match ->
-                    val link = match.groupValues[1].ifEmpty { match.groupValues[2] }
-                    if (link.isNotBlank()) {
-                        callback(
-                            newExtractorLink(
-                                source = this.name,
-                                name = "${this.name} (HLS)",
-                                url = link,
-                                type = ExtractorLinkType.M3U8
-                            ) {
-                                this.referer = embed
-                                this.quality = Qualities.P1080.value
-                            }
-                        )
-                        success = true
-                    }
+            // 3. Fallback cưỡng chế: Đảm bảo luôn trả về link embed để Cloudstream xử lý hiển thị
+            callback(
+                newExtractorLink(
+                    source = this.name,
+                    name = "${this.name} (Embed Player)",
+                    url = embed,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = ref
+                    this.quality = Qualities.P1080.value
                 }
-
-                val fileRegex = Regex("(?:file|url|source|src)\\s*[:=]\\s*[\"'](https?://[^\"']+)[\"']")
-                fileRegex.findAll(embedHtml).forEach { match ->
-                    val link = match.groupValues[1]
-                    if (link.isNotBlank() && (link.contains("m3u8") || link.contains("mp4"))) {
-                        callback(
-                            newExtractorLink(
-                                source = this.name,
-                                name = "${this.name} (Stream)",
-                                url = link,
-                                type = ExtractorLinkType.M3U8
-                            ) {
-                                this.referer = embed
-                                this.quality = Qualities.P1080.value
-                            }
-                        )
-                        success = true
-                    }
-                }
-            }
+            )
+            found = true
         }
 
-        if (!success) {
-            val errorMsg = "KHÔNG TÌM THẤY LIÊN KẾT | Payload: $data | Embed: $embed | M3u8: $m3u8"
-            Log.e(TAG, errorMsg)
-            copyLogToClipboard(errorMsg)
-        }
-
-        return success
+        return found
     }
 
     data class NguonCPaginate(
