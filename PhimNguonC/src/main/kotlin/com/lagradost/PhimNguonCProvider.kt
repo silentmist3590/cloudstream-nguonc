@@ -7,10 +7,6 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.*
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.RequestBody.Companion.toRequestBody
-import java.net.URI
-import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 
 private const val LINK_SEP = "|||"
@@ -126,46 +122,6 @@ class PhimNguonCProvider : MainAPI() {
         }
     }
 
-    /**
-     * Bắt tay tự động với hệ thống stream để lấy direct HLS Playlist
-     */
-    private suspend fun resolveStreamCPlaylist(embedUrl: String): String? {
-        return runCatching {
-            val uri = URI(embedUrl)
-            val origin = "${uri.scheme}://${uri.host}"
-            val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
-
-            val baseHeaders = mapOf(
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                "Referer" to embedUrl,
-                "Origin" to origin,
-                "Content-Type" to "application/json"
-            )
-
-            // BƯỚC 1: Gửi yêu cầu Bootstrap lấy phiên làm việc
-            val bootPayload = """{"action":"bootstrap","mode":"json","frame_origins":["https://phim.nguonc.com"]}"""
-            val bootResp = app.post(
-                embedUrl,
-                headers = baseHeaders,
-                requestBody = bootPayload.toRequestBody(mediaType)
-            ).text
-
-            val bootJson = jsonMapper.readTree(bootResp)
-            val bootstrapToken = bootJson.get("bootstrap")?.asText() ?: return null
-
-            // BƯỚC 2: Gửi yêu cầu Issue với định dạng HLS để lấy URL Playlist thật
-            val issuePayload = """{"action":"issue","bootstrap":"$bootstrapToken","turnstile_response":null,"playlist_format":"hls","pretty_url":true,"path_chunks":true,"frame_origins":["https://phim.nguonc.com"]}"""
-            val issueResp = app.post(
-                embedUrl,
-                headers = baseHeaders,
-                requestBody = issuePayload.toRequestBody(mediaType)
-            ).text
-
-            val issueJson = jsonMapper.readTree(issueResp)
-            issueJson.get("playlist")?.asText()
-        }.getOrNull()
-    }
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -178,75 +134,20 @@ class PhimNguonCProvider : MainAPI() {
         val webUrl = parts.getOrNull(2).orEmpty()
         val ref = if (webUrl.isNotBlank()) webUrl else "$mainUrl/"
 
-        var ok = false
-
-        // 1. Nếu có link m3u8 sẵn trong API (trường hợp phim cũ)
+        // 1. Xử lý link m3u8 trực tiếp nếu có sẵn
         if (m3u8.startsWith("http")) {
-            val res = runCatching {
-                app.get(
-                    m3u8,
-                    headers = mapOf(
-                        "Referer" to ref,
-                        "Origin" to mainUrl,
-                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                    )
-                )
-            }.getOrNull()
-
-            val text = res?.text?.trim().orEmpty()
-            if (text.startsWith("#EXTM3U")) {
-                runCatching {
-                    M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
-                        callback(
-                            newExtractorLink(
-                                source = this.name,
-                                name = link.name,
-                                url = link.url,
-                                type = ExtractorLinkType.M3U8
-                            ) {
-                                this.referer = ref
-                                this.quality = link.quality
-                                this.headers = mapOf(
-                                    "Referer" to ref,
-                                    "Origin" to mainUrl,
-                                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                                )
-                            }
-                        )
-                        ok = true
-                    }
+            val success = runCatching {
+                M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
+                    callback(link)
                 }
-                if (ok) return true
-            }
+                true
+            }.getOrDefault(false)
+            if (success) return true
         }
 
-        // 2. Xử lý link embed - Giao thức bắt tay 2 bước và đính kèm đầy đủ Header chống lỗi 403/2004
+        // 2. Xử lý link embed thông qua cơ chế WebViewExtractor nội bộ của Cloudstream
+        // Giúp chạy thành công các script giải mã AES-GCM / Web Crypto trên trang phát
         if (embed.startsWith("http")) {
-            val playlistUrl = resolveStreamCPlaylist(embed)
-            if (!playlistUrl.isNullOrBlank()) {
-                val uri = URI(embed)
-                val origin = "${uri.scheme}://${uri.host}"
-                
-                callback(
-                    newExtractorLink(
-                        source = this.name,
-                        name = "${this.name} (HLS)",
-                        url = playlistUrl,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = embed
-                        this.headers = mapOf(
-                            "Referer" to embed,
-                            "Origin" to origin,
-                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                        )
-                        this.quality = Qualities.P1080.value
-                    }
-                )
-                return true
-            }
-
-            // Fallback: Thử các extractor mặc định khác của CloudStream
             val extracted = runCatching {
                 loadExtractor(embed, ref, subtitleCallback, callback)
             }.getOrDefault(false)
