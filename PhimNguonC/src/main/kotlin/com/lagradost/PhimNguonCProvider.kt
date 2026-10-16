@@ -137,53 +137,64 @@ class PhimNguonCProvider : MainAPI() {
 
         var found = false
 
-        // 1. Xử lý link m3u8 nếu có
+        // 1. Xử lý link m3u8 trực tiếp nếu có
         if (m3u8.isNotBlank() && m3u8.startsWith("http")) {
             runCatching {
-                M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
-                    callback(link)
-                    found = true
+                if (m3u8.contains(".m3u8")) {
+                    M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
+                        callback(link)
+                        found = true
+                    }
                 }
             }
             if (!found) {
-                callback(
-                    newExtractorLink(
-                        source = this.name,
-                        name = "${this.name} (M3U8)",
-                        url = m3u8,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = ref
-                        this.quality = Qualities.P1080.value
-                    }
-                )
-                found = true
+                val extracted = runCatching {
+                    loadExtractor(m3u8, ref, subtitleCallback, callback)
+                }.getOrDefault(false)
+                if (extracted) found = true
             }
         }
 
         if (found) return true
 
-        // 2. Xử lý link embed qua loadExtractor
+        // 2. Xử lý link embed bằng cách trích xuất luồng m3u8 thật từ mã nguồn trang
         if (embed.isNotBlank() && embed.startsWith("http")) {
-            found = runCatching {
+            val extracted = runCatching {
                 loadExtractor(embed, ref, subtitleCallback, callback)
             }.getOrDefault(false)
 
-            if (found) return true
+            if (extracted) return true
 
-            // 3. Fallback cưỡng chế: Đảm bảo luôn trả về link embed để Cloudstream xử lý hiển thị
-            callback(
-                newExtractorLink(
-                    source = this.name,
-                    name = "${this.name} (Embed Player)",
-                    url = embed,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    this.referer = ref
-                    this.quality = Qualities.P1080.value
+            val embedHtml = runCatching {
+                app.get(
+                    embed,
+                    headers = mapOf(
+                        "Referer" to ref,
+                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                    )
+                ).text
+            }.getOrNull()
+
+            if (!embedHtml.isNullOrBlank()) {
+                val m3u8Regex = Regex("[\"'](https?://[^\"']+\\.m3u8[^\"']*)[\"']")
+                m3u8Regex.findAll(embedHtml).forEach { match ->
+                    val hlsUrl = match.groupValues[1]
+                    if (hlsUrl.isNotBlank()) {
+                        callback(
+                            newExtractorLink(
+                                source = this.name,
+                                name = "${this.name} (HLS)",
+                                url = hlsUrl,
+                                type = ExtractorLinkType.M3U8
+                            ) {
+                                this.referer = embed
+                                this.quality = Qualities.P1080.value
+                            }
+                        )
+                        found = true
+                    }
                 }
-            )
-            found = true
+            }
         }
 
         return found
